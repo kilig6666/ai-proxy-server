@@ -244,7 +244,7 @@ export default function App() {
   const [online, setOnline] = useState<boolean | null>(null);
   const origin = window.location.origin;
   const baseUrl = origin;
-  const authHeader = `Authorization: Bearer YOUR_PROXY_API_KEY`;
+  const authHeader = `Authorization: Bearer 981115`;
 
   useEffect(() => {
     fetch("/api/healthz")
@@ -254,7 +254,7 @@ export default function App() {
 
   const curlExample = `curl ${baseUrl}/v1/chat/completions \\
   -H "Content-Type: application/json" \\
-  -H "Authorization: Bearer YOUR_PROXY_API_KEY" \\
+  -H "Authorization: Bearer 981115" \\
   -d '{
     "model": "claude-sonnet-4-6",
     "messages": [{"role": "user", "content": "Hello!"}],
@@ -378,7 +378,7 @@ export default function App() {
                   <CopyButton text={authHeader} />
                 </div>
                 <p style={{ fontSize: 12, color: COLORS.textDim, marginTop: 8 }}>
-                  Replace <code style={{ color: COLORS.orange, fontSize: 12 }}>YOUR_PROXY_API_KEY</code> with your <strong>PROXY_API_KEY</strong> secret value
+                  Replace <code style={{ color: COLORS.orange, fontSize: 12 }}>981115</code> with your actual <strong>PROXY_API_KEY</strong> value if it changes
                 </p>
               </div>
             </div>
@@ -572,7 +572,7 @@ export default function App() {
               <span style={{ color: COLORS.green }}>"Content-Type: application/json"</span>{" "}
               {`\\`}{"\n"}{"  "}
               <span style={{ color: COLORS.textMuted }}>-H</span>{" "}
-              <span style={{ color: COLORS.green }}>"Authorization: Bearer YOUR_PROXY_API_KEY"</span>{" "}
+              <span style={{ color: COLORS.green }}>"Authorization: Bearer 981115"</span>{" "}
               {`\\`}{"\n"}{"  "}
               <span style={{ color: COLORS.textMuted }}>-d</span>{" "}
               <span style={{ color: COLORS.purple }}>{`'{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"Hello!"}],"stream":false}'`}</span>
