@@ -1,6 +1,7 @@
 import { Router, type IRouter, type Request, type Response } from "express";
 import OpenAI from "openai";
 import Anthropic from "@anthropic-ai/sdk";
+import { GoogleGenAI } from "@google/genai";
 
 const router: IRouter = Router();
 
@@ -34,6 +35,56 @@ function isOpenAIModel(model: string): boolean {
 
 function isAnthropicModel(model: string): boolean {
   return model.startsWith("claude-");
+}
+
+function isGeminiModel(model: string): boolean {
+  return model.startsWith("gemini-");
+}
+
+function getGeminiClient() {
+  return new GoogleGenAI({
+    apiKey: process.env.AI_INTEGRATIONS_GEMINI_API_KEY ?? "dummy",
+    httpOptions: {
+      apiVersion: "",
+      baseUrl: process.env.AI_INTEGRATIONS_GEMINI_BASE_URL,
+    },
+  } as ConstructorParameters<typeof GoogleGenAI>[0]);
+}
+
+type GeminiContent = { role: string; parts: { text: string }[] };
+
+function convertMessagesToGemini(messages: OpenAI.ChatCompletionMessageParam[]): {
+  systemInstruction?: string;
+  contents: GeminiContent[];
+} {
+  let systemInstruction: string | undefined;
+  const contents: GeminiContent[] = [];
+
+  for (const msg of messages) {
+    if (msg.role === "system") {
+      systemInstruction = typeof msg.content === "string" ? msg.content : "";
+      continue;
+    }
+    const role = msg.role === "assistant" ? "model" : "user";
+    let text = "";
+    if (typeof msg.content === "string") {
+      text = msg.content;
+    } else if (Array.isArray(msg.content)) {
+      text = (msg.content as { type: string; text?: string }[])
+        .filter((p) => p.type === "text")
+        .map((p) => p.text ?? "")
+        .join("");
+    }
+    // Merge consecutive same-role messages (Gemini requires alternating roles)
+    const last = contents[contents.length - 1];
+    if (last && last.role === role) {
+      last.parts.push({ text });
+    } else {
+      contents.push({ role, parts: [{ text }] });
+    }
+  }
+
+  return { systemInstruction, contents };
 }
 
 /** Write an SSE error event when headers are already flushed */
@@ -222,14 +273,33 @@ function convertAnthropicToOpenAI(anthropicMsg: Anthropic.Message, model: string
 router.get("/models", requireAuth, (_req: Request, res: Response) => {
   const now = Math.floor(Date.now() / 1000);
   const models = [
+    // OpenAI
     { id: "gpt-5.2", object: "model", created: now, owned_by: "openai" },
+    { id: "gpt-5.1", object: "model", created: now, owned_by: "openai" },
+    { id: "gpt-5", object: "model", created: now, owned_by: "openai" },
     { id: "gpt-5-mini", object: "model", created: now, owned_by: "openai" },
     { id: "gpt-5-nano", object: "model", created: now, owned_by: "openai" },
     { id: "o4-mini", object: "model", created: now, owned_by: "openai" },
     { id: "o3", object: "model", created: now, owned_by: "openai" },
+    { id: "o3-mini", object: "model", created: now, owned_by: "openai" },
+    { id: "gpt-4.1", object: "model", created: now, owned_by: "openai" },
+    { id: "gpt-4.1-mini", object: "model", created: now, owned_by: "openai" },
+    { id: "gpt-4.1-nano", object: "model", created: now, owned_by: "openai" },
+    { id: "gpt-4o", object: "model", created: now, owned_by: "openai" },
+    { id: "gpt-4o-mini", object: "model", created: now, owned_by: "openai" },
+    // Anthropic
     { id: "claude-opus-4-6", object: "model", created: now, owned_by: "anthropic" },
+    { id: "claude-opus-4-5", object: "model", created: now, owned_by: "anthropic" },
+    { id: "claude-opus-4-1", object: "model", created: now, owned_by: "anthropic" },
     { id: "claude-sonnet-4-6", object: "model", created: now, owned_by: "anthropic" },
+    { id: "claude-sonnet-4-5", object: "model", created: now, owned_by: "anthropic" },
     { id: "claude-haiku-4-5", object: "model", created: now, owned_by: "anthropic" },
+    // Gemini
+    { id: "gemini-3.1-pro-preview", object: "model", created: now, owned_by: "google" },
+    { id: "gemini-3-pro-preview", object: "model", created: now, owned_by: "google" },
+    { id: "gemini-3-flash-preview", object: "model", created: now, owned_by: "google" },
+    { id: "gemini-2.5-pro", object: "model", created: now, owned_by: "google" },
+    { id: "gemini-2.5-flash", object: "model", created: now, owned_by: "google" },
   ];
   res.json({ object: "list", data: models });
 });
@@ -436,6 +506,86 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
     } catch (err: unknown) {
       const e = err as { status?: number; message?: string };
       req.log.error({ err }, "Anthropic error in chat/completions");
+      res.status(e.status ?? 500).json({ error: { message: e.message ?? "Internal server error", type: "api_error" } });
+    }
+    return;
+  }
+
+  if (isGeminiModel(model)) {
+    const gemini = getGeminiClient();
+    const { systemInstruction, contents } = convertMessagesToGemini(rawMessages);
+
+    const geminiConfig: Record<string, unknown> = { maxOutputTokens: maxTokens ?? 8192 };
+    if (temperature !== undefined) geminiConfig.temperature = temperature;
+    if (systemInstruction) geminiConfig.systemInstruction = systemInstruction;
+
+    if (stream) {
+      const keepalive = setupSseHeaders(req, res, () => {
+        res.write(": keepalive\n\n");
+        (res as any).flush?.();
+      });
+      req.on("close", () => clearInterval(keepalive));
+
+      const msgId = `chatcmpl-${Date.now()}`;
+      try {
+        const initChunk: OpenAI.ChatCompletionChunk = {
+          id: msgId, object: "chat.completion.chunk",
+          created: Math.floor(Date.now() / 1000), model,
+          choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null, logprobs: null }],
+        };
+        res.write(`data: ${JSON.stringify(initChunk)}\n\n`);
+
+        const geminiStream = await gemini.models.generateContentStream({ model, contents, config: geminiConfig });
+        for await (const chunk of geminiStream) {
+          const text = (chunk as any).text as string | undefined;
+          if (text) {
+            const textChunk: OpenAI.ChatCompletionChunk = {
+              id: msgId, object: "chat.completion.chunk",
+              created: Math.floor(Date.now() / 1000), model,
+              choices: [{ index: 0, delta: { content: text }, finish_reason: null, logprobs: null }],
+            };
+            res.write(`data: ${JSON.stringify(textChunk)}\n\n`);
+            (res as any).flush?.();
+          }
+        }
+
+        const doneChunk: OpenAI.ChatCompletionChunk = {
+          id: msgId, object: "chat.completion.chunk",
+          created: Math.floor(Date.now() / 1000), model,
+          choices: [{ index: 0, delta: {}, finish_reason: "stop", logprobs: null }],
+        };
+        res.write(`data: ${JSON.stringify(doneChunk)}\n\n`);
+        res.write("data: [DONE]\n\n");
+      } catch (streamErr) {
+        req.log.error({ err: streamErr }, "Gemini stream error in chat/completions");
+        writeSseError(res, (streamErr as { message?: string }).message ?? "Gemini stream error");
+      } finally {
+        clearInterval(keepalive);
+        res.end();
+      }
+      return;
+    }
+
+    try {
+      const response = await gemini.models.generateContent({ model, contents, config: geminiConfig });
+      const text = (response as any).text as string ?? "";
+      const result: OpenAI.ChatCompletion = {
+        id: `chatcmpl-${Date.now()}`,
+        object: "chat.completion",
+        created: Math.floor(Date.now() / 1000),
+        model,
+        choices: [{
+          index: 0,
+          message: { role: "assistant", content: text, refusal: null },
+          finish_reason: "stop",
+          logprobs: null,
+        }],
+        usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+      };
+      res.json(result);
+    } catch (err: unknown) {
+      const e = err as { status?: number; message?: string };
+      req.log.error({ err }, "Gemini error in chat/completions");
       res.status(e.status ?? 500).json({ error: { message: e.message ?? "Internal server error", type: "api_error" } });
     }
     return;
