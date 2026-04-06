@@ -750,7 +750,7 @@ function fmtUsd(n: number): string {
 }
 
 export default function App() {
-  const [dark, setDark] = useState(true);
+  const [dark, setDark] = useState(false);
   const [lang, setLang] = useState<Lang>(() => (localStorage.getItem("portalLang") as Lang) ?? "cn");
   const [online, setOnline] = useState<boolean | null>(null);
   const [authed, setAuthed] = useState(false);
