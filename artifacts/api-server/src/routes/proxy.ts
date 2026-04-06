@@ -5,25 +5,111 @@ import { GoogleGenAI } from "@google/genai";
 
 const router: IRouter = Router();
 
-function getOpenAIClient() {
-  return new OpenAI({
-    baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
-    apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
-  });
+// ─── Fix 3: Singleton clients — created once, reused across all requests ───────
+
+let _openai: OpenAI | null = null;
+function getOpenAIClient(): OpenAI {
+  if (!_openai) {
+    _openai = new OpenAI({
+      baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
+      apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
+    });
+  }
+  return _openai;
 }
 
-function getAnthropicClient() {
-  return new Anthropic({
-    baseURL: process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL,
-    apiKey: process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY,
-  });
+let _anthropic: Anthropic | null = null;
+function getAnthropicClient(): Anthropic {
+  if (!_anthropic) {
+    _anthropic = new Anthropic({
+      baseURL: process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL,
+      apiKey: process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY,
+    });
+  }
+  return _anthropic;
 }
+
+let _gemini: GoogleGenAI | null = null;
+function getGeminiClient(): GoogleGenAI {
+  if (!_gemini) {
+    _gemini = new GoogleGenAI({
+      apiKey: process.env.AI_INTEGRATIONS_GEMINI_API_KEY ?? "dummy",
+      httpOptions: {
+        apiVersion: "",
+        baseUrl: process.env.AI_INTEGRATIONS_GEMINI_BASE_URL,
+      },
+    } as ConstructorParameters<typeof GoogleGenAI>[0]);
+  }
+  return _gemini;
+}
+
+// ─── Fix 10: In-memory rate limiter (120 req/min per API key) ─────────────────
+
+const RATE_LIMIT_RPM = 120;
+const _rateBuckets = new Map<string, { count: number; resetAt: number }>();
+
+function checkRateLimit(key: string): { allowed: boolean; retryAfter?: number } {
+  const now = Date.now();
+  let bucket = _rateBuckets.get(key);
+  if (!bucket || now >= bucket.resetAt) {
+    bucket = { count: 0, resetAt: now + 60_000 };
+    _rateBuckets.set(key, bucket);
+  }
+  bucket.count++;
+  if (bucket.count > RATE_LIMIT_RPM) {
+    return { allowed: false, retryAfter: Math.ceil((bucket.resetAt - now) / 1000) };
+  }
+  return { allowed: true };
+}
+
+// ─── Fix 1: Retry with exponential backoff (for 429 / 50x / network errors) ──
+
+function isRetryableError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as { status?: number; code?: string };
+  if ([429, 502, 503, 504].includes(e.status ?? 0)) return true;
+  if (["ECONNRESET", "ETIMEDOUT", "ENOTFOUND"].includes(e.code ?? "")) return true;
+  return false;
+}
+
+async function withRetry<T>(fn: () => Promise<T>, maxAttempts = 3): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (!isRetryableError(err) || attempt === maxAttempts - 1) throw err;
+      const delay = Math.min(1000 * 2 ** attempt + Math.random() * 300, 8000);
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+  throw lastErr;
+}
+
+// ─── Fix 2: Request timeout via AbortController (60 s) ────────────────────────
+
+const UPSTREAM_TIMEOUT_MS = 60_000;
+
+function makeAbortController(): { controller: AbortController; clear: () => void } {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error("Upstream timeout")), UPSTREAM_TIMEOUT_MS);
+  return { controller, clear: () => clearTimeout(timer) };
+}
+
+// ─── Auth + rate-limit middleware ─────────────────────────────────────────────
 
 function requireAuth(req: Request, res: Response, next: () => void) {
   const proxyKey = process.env.PROXY_API_KEY;
   const auth = req.headers.authorization;
   if (!auth || auth !== `Bearer ${proxyKey}`) {
     res.status(401).json({ error: { message: "Unauthorized", type: "authentication_error", code: 401 } });
+    return;
+  }
+  const { allowed, retryAfter } = checkRateLimit(auth);
+  if (!allowed) {
+    res.setHeader("Retry-After", String(retryAfter ?? 60));
+    res.status(429).json({ error: { message: "Rate limit exceeded. Please retry later.", type: "rate_limit_error", code: 429 } });
     return;
   }
   next();
@@ -41,17 +127,28 @@ function isGeminiModel(model: string): boolean {
   return model.startsWith("gemini-");
 }
 
-function getGeminiClient() {
-  return new GoogleGenAI({
-    apiKey: process.env.AI_INTEGRATIONS_GEMINI_API_KEY ?? "dummy",
-    httpOptions: {
-      apiVersion: "",
-      baseUrl: process.env.AI_INTEGRATIONS_GEMINI_BASE_URL,
-    },
-  } as ConstructorParameters<typeof GoogleGenAI>[0]);
+// ─── Fix 6: Gemini finish_reason mapping ──────────────────────────────────────
+
+function mapGeminiFinishReason(reason: string | undefined): OpenAI.ChatCompletion.Choice["finish_reason"] {
+  switch (reason) {
+    case "STOP": return "stop";
+    case "MAX_TOKENS": return "length";
+    case "SAFETY":
+    case "RECITATION": return "content_filter";
+    case "TOOL_CALLS":
+    case "FUNCTION_CALL": return "tool_calls";
+    default: return "stop";
+  }
 }
 
-type GeminiContent = { role: string; parts: { text: string }[] };
+// ─── Fix 4+8: Gemini message + tool conversion ────────────────────────────────
+
+type GeminiPart =
+  | { text: string }
+  | { functionCall: { name: string; args: Record<string, unknown> } }
+  | { functionResponse: { name: string; response: Record<string, unknown> } };
+
+type GeminiContent = { role: string; parts: GeminiPart[] };
 
 function convertMessagesToGemini(messages: OpenAI.ChatCompletionMessageParam[]): {
   systemInstruction?: string;
@@ -60,59 +157,103 @@ function convertMessagesToGemini(messages: OpenAI.ChatCompletionMessageParam[]):
   let systemInstruction: string | undefined;
   const contents: GeminiContent[] = [];
 
+  // Build a tool_call_id → function_name map for tool result conversion
+  const toolCallNameMap = new Map<string, string>();
+  for (const msg of messages) {
+    if (msg.role === "assistant" && msg.tool_calls) {
+      for (const tc of msg.tool_calls) {
+        toolCallNameMap.set(tc.id, tc.function.name);
+      }
+    }
+  }
+
   for (const msg of messages) {
     if (msg.role === "system") {
       systemInstruction = typeof msg.content === "string" ? msg.content : "";
       continue;
     }
-    const role = msg.role === "assistant" ? "model" : "user";
-    let text = "";
-    if (typeof msg.content === "string") {
-      text = msg.content;
-    } else if (Array.isArray(msg.content)) {
-      text = (msg.content as { type: string; text?: string }[])
-        .filter((p) => p.type === "text")
-        .map((p) => p.text ?? "")
-        .join("");
+
+    if (msg.role === "tool") {
+      const name = toolCallNameMap.get(msg.tool_call_id) ?? "unknown_function";
+      const resultText = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content);
+      const part: GeminiPart = {
+        functionResponse: { name, response: { content: resultText } },
+      };
+      const last = contents[contents.length - 1];
+      if (last && last.role === "user") {
+        last.parts.push(part);
+      } else {
+        contents.push({ role: "user", parts: [part] });
+      }
+      continue;
     }
-    // Merge consecutive same-role messages (Gemini requires alternating roles)
-    const last = contents[contents.length - 1];
-    if (last && last.role === role) {
-      last.parts.push({ text });
-    } else {
-      contents.push({ role, parts: [{ text }] });
+
+    if (msg.role === "assistant") {
+      const parts: GeminiPart[] = [];
+      const text = typeof msg.content === "string" ? msg.content
+        : Array.isArray(msg.content)
+          ? (msg.content as { type: string; text?: string }[]).filter(p => p.type === "text").map(p => p.text ?? "").join("")
+          : "";
+      if (text) parts.push({ text });
+      if (msg.tool_calls) {
+        for (const tc of msg.tool_calls) {
+          let args: Record<string, unknown> = {};
+          try { args = JSON.parse(tc.function.arguments); } catch {}
+          parts.push({ functionCall: { name: tc.function.name, args } });
+        }
+      }
+      if (parts.length === 0) parts.push({ text: "" });
+      contents.push({ role: "model", parts });
+      continue;
+    }
+
+    if (msg.role === "user") {
+      let parts: GeminiPart[] = [];
+      if (typeof msg.content === "string") {
+        parts = [{ text: msg.content }];
+      } else if (Array.isArray(msg.content)) {
+        parts = (msg.content as { type: string; text?: string }[])
+          .filter(p => p.type === "text")
+          .map(p => ({ text: p.text ?? "" }));
+        if (parts.length === 0) parts = [{ text: "" }];
+      } else {
+        parts = [{ text: "" }];
+      }
+      const last = contents[contents.length - 1];
+      if (last && last.role === "user") {
+        last.parts.push(...parts);
+      } else {
+        contents.push({ role: "user", parts });
+      }
     }
   }
 
   return { systemInstruction, contents };
 }
 
-/** Write an SSE error event when headers are already flushed */
-function writeSseError(res: Response, message: string) {
-  try {
-    const chunk: OpenAI.ChatCompletionChunk = {
-      id: `err-${Date.now()}`,
-      object: "chat.completion.chunk",
-      created: Math.floor(Date.now() / 1000),
-      model: "",
-      choices: [{ index: 0, delta: {}, finish_reason: "stop", logprobs: null }],
-    };
-    res.write(`data: ${JSON.stringify(chunk)}\n\n`);
-    res.write(`data: [DONE]\n\n`);
-  } catch {
-    // best-effort
-  }
+function convertToolsToGemini(tools: OpenAI.ChatCompletionTool[]): Record<string, unknown>[] {
+  return [{
+    functionDeclarations: tools.map(t => ({
+      name: t.function.name,
+      description: t.function.description ?? "",
+      parameters: t.function.parameters ?? { type: "object", properties: {} },
+    })),
+  }];
 }
 
-function setupSseHeaders(req: Request, res: Response, keepaliveFn: () => void): ReturnType<typeof setInterval> {
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
-  res.setHeader("X-Accel-Buffering", "no");
-  res.flushHeaders();
-  const keepalive = setInterval(keepaliveFn, 5000);
-  return keepalive;
+function convertToolChoiceToGemini(
+  toolChoice: OpenAI.ChatCompletionCreateParams["tool_choice"],
+): Record<string, unknown> | undefined {
+  if (!toolChoice || toolChoice === "auto") return undefined;
+  if (toolChoice === "none") return { function_calling_config: { mode: "NONE" } };
+  if (toolChoice === "required") return { function_calling_config: { mode: "ANY" } };
+  if (typeof toolChoice === "object" && toolChoice.type === "function") {
+    return { function_calling_config: { mode: "ANY", allowed_function_names: [toolChoice.function.name] } };
+  }
+  return undefined;
 }
+
+// ─── Anthropic tool conversion ─────────────────────────────────────────────────
 
 function convertToolsToAnthropic(tools: OpenAI.ChatCompletionTool[]): Anthropic.Tool[] {
   return tools.map((t) => ({
@@ -180,7 +321,6 @@ function convertMessagesToAnthropic(
         }
         converted.push({ role: "assistant", content });
       } else {
-        // Only pass role + content — strip any extra OpenAI fields
         converted.push({
           role: "assistant",
           content: typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content ?? ""),
@@ -190,12 +330,10 @@ function convertMessagesToAnthropic(
     }
 
     if (msg.role === "user") {
-      // Only pass role + content — strip cache_control and any other unknown fields
       const rawContent = msg.content;
       if (typeof rawContent === "string") {
         converted.push({ role: "user", content: rawContent });
       } else if (Array.isArray(rawContent)) {
-        // Convert multipart content, strip unknown fields
         const blocks: Anthropic.ContentBlockParam[] = rawContent.map((part) => {
           if (part.type === "text") {
             return { type: "text" as const, text: part.text };
@@ -269,7 +407,34 @@ function convertAnthropicToOpenAI(anthropicMsg: Anthropic.Message, model: string
   };
 }
 
-// ─── GET /v1/models ──────────────────────────────────────────────────────────
+/** Write an SSE error event when headers are already flushed */
+function writeSseError(res: Response, message: string) {
+  try {
+    const chunk: OpenAI.ChatCompletionChunk = {
+      id: `err-${Date.now()}`,
+      object: "chat.completion.chunk",
+      created: Math.floor(Date.now() / 1000),
+      model: "",
+      choices: [{ index: 0, delta: {}, finish_reason: "stop", logprobs: null }],
+    };
+    res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+    res.write(`data: [DONE]\n\n`);
+  } catch {
+    // best-effort
+  }
+}
+
+function setupSseHeaders(req: Request, res: Response, keepaliveFn: () => void): ReturnType<typeof setInterval> {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders();
+  const keepalive = setInterval(keepaliveFn, 5000);
+  return keepalive;
+}
+
+// ─── GET /v1/models ───────────────────────────────────────────────────────────
 
 router.get("/models", requireAuth, (_req: Request, res: Response) => {
   const now = Math.floor(Date.now() / 1000);
@@ -312,16 +477,20 @@ router.get("/models", requireAuth, (_req: Request, res: Response) => {
 // ─── POST /v1/chat/completions ────────────────────────────────────────────────
 
 router.post("/chat/completions", requireAuth, async (req: Request, res: Response) => {
-  // Extract only the fields we need — this strips unknown/incompatible fields like stream_options
   const body = req.body as Record<string, unknown>;
   const model = body.model as string;
   const stream = Boolean(body.stream);
   const rawMessages = (body.messages ?? []) as OpenAI.ChatCompletionMessageParam[];
   const tools = body.tools as OpenAI.ChatCompletionTool[] | undefined;
   const toolChoice = body.tool_choice as OpenAI.ChatCompletionCreateParams["tool_choice"] | undefined;
+  // Fix 7: extract all common sampling params
   const temperature = body.temperature as number | undefined;
   const maxTokens = body.max_tokens as number | undefined;
-  // Detect whether the client wants usage reported in the final streaming chunk
+  const topP = body.top_p as number | undefined;
+  const stop = body.stop as string | string[] | null | undefined;
+  const presencePenalty = body.presence_penalty as number | undefined;
+  const frequencyPenalty = body.frequency_penalty as number | undefined;
+  // Fix 9: preserve stream_options for OpenAI pass-through; detect include_usage for Anthropic/Gemini
   const streamOpts = body.stream_options as { include_usage?: boolean } | undefined;
   const includeUsageInStream = Boolean(streamOpts?.include_usage);
 
@@ -330,8 +499,8 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
     return;
   }
 
+  // ── OpenAI ──────────────────────────────────────────────────────────────────
   if (isOpenAIModel(model)) {
-    // Build a clean OpenAI params object
     const openAIParams: OpenAI.ChatCompletionCreateParams = {
       model,
       messages: rawMessages,
@@ -341,8 +510,16 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
     if (toolChoice) openAIParams.tool_choice = toolChoice;
     if (temperature !== undefined) openAIParams.temperature = temperature;
     if (maxTokens !== undefined) openAIParams.max_tokens = maxTokens;
+    // Fix 7: forward extra sampling params
+    if (topP !== undefined) openAIParams.top_p = topP;
+    if (stop != null) openAIParams.stop = stop as string | string[];
+    if (presencePenalty !== undefined) openAIParams.presence_penalty = presencePenalty;
+    if (frequencyPenalty !== undefined) openAIParams.frequency_penalty = frequencyPenalty;
+    // Fix 9: pass stream_options through to OpenAI natively
+    if (stream && streamOpts) (openAIParams as Record<string, unknown>).stream_options = streamOpts;
 
     const openai = getOpenAIClient();
+    const startTs = Date.now();
 
     if (stream) {
       const keepalive = setupSseHeaders(req, res, () => {
@@ -352,14 +529,21 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
       req.on("close", () => clearInterval(keepalive));
 
       try {
-        const streamRes = await openai.chat.completions.create({ ...openAIParams, stream: true });
+        const { controller, clear } = makeAbortController();
+        req.on("close", clear);
+        const streamRes = await withRetry(() =>
+          openai.chat.completions.create({ ...openAIParams, stream: true }, { signal: controller.signal })
+        );
         for await (const chunk of streamRes) {
           res.write(`data: ${JSON.stringify(chunk)}\n\n`);
           (res as any).flush?.();
         }
         res.write("data: [DONE]\n\n");
+        clear();
+        // Fix 11: log latency
+        req.log.info({ model, provider: "openai", latencyMs: Date.now() - startTs, stream: true }, "OpenAI stream complete");
       } catch (streamErr) {
-        req.log.error({ err: streamErr }, "OpenAI stream error in chat/completions");
+        req.log.error({ err: streamErr, model, provider: "openai" }, "OpenAI stream error");
         writeSseError(res, (streamErr as { message?: string }).message ?? "Stream error");
       } finally {
         clearInterval(keepalive);
@@ -367,17 +551,30 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
       }
     } else {
       try {
-        const result = await openai.chat.completions.create({ ...openAIParams, stream: false });
+        const { controller, clear } = makeAbortController();
+        const result = await withRetry(() =>
+          openai.chat.completions.create({ ...openAIParams, stream: false }, { signal: controller.signal })
+        );
+        clear();
+        // Fix 11: log model + usage + latency
+        req.log.info({
+          model,
+          provider: "openai",
+          latencyMs: Date.now() - startTs,
+          promptTokens: result.usage?.prompt_tokens,
+          completionTokens: result.usage?.completion_tokens,
+        }, "OpenAI request complete");
         res.json(result);
       } catch (err: unknown) {
         const e = err as { status?: number; message?: string };
-        req.log.error({ err }, "OpenAI error in chat/completions");
+        req.log.error({ err, model, provider: "openai" }, "OpenAI error");
         res.status(e.status ?? 500).json({ error: { message: e.message ?? "Internal server error", type: "api_error" } });
       }
     }
     return;
   }
 
+  // ── Anthropic ────────────────────────────────────────────────────────────────
   if (isAnthropicModel(model)) {
     const anthropic = getAnthropicClient();
     const { system, messages } = convertMessagesToAnthropic(rawMessages);
@@ -388,12 +585,19 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
       messages,
     };
     if (system) anthropicParams.system = system;
-    // When tool_choice is "none", Anthropic has no equivalent — omit both tools and tool_choice
-    // so the model cannot invoke any functions.
+    // Fix B: when tool_choice is "none", strip both tools and tool_choice
     const effectiveToolChoice = toolChoice === "none" ? undefined : toolChoice;
     if (tools && toolChoice !== "none") anthropicParams.tools = convertToolsToAnthropic(tools);
     if (effectiveToolChoice) anthropicParams.tool_choice = convertToolChoiceToAnthropic(effectiveToolChoice);
     if (temperature !== undefined) anthropicParams.temperature = temperature;
+    // Fix 7: forward top_p and stop sequences where Anthropic supports them
+    if (topP !== undefined) (anthropicParams as Record<string, unknown>).top_p = topP;
+    if (stop != null) {
+      const stopArr = Array.isArray(stop) ? stop : [stop];
+      if (stopArr.length > 0) (anthropicParams as Record<string, unknown>).stop_sequences = stopArr;
+    }
+
+    const startTs = Date.now();
 
     if (stream) {
       const keepalive = setupSseHeaders(req, res, () => {
@@ -405,7 +609,6 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
       let messageId = `chatcmpl-${Date.now()}`;
       let toolUseBlocks: { id: string; name: string; inputJson: string }[] = [];
       let currentToolIndex = -1;
-      // Track usage tokens for stream_options.include_usage support
       let streamInputTokens = 0;
       let streamOutputTokens = 0;
 
@@ -416,8 +619,7 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
           if (event.type === "message_start") {
             messageId = event.message.id;
             streamInputTokens = event.message.usage?.input_tokens ?? 0;
-            // Fix C: send content: null (not "") to correctly signal no text content yet.
-            // OpenAI spec uses null in the role-announcement chunk.
+            // Fix C: content: null (not "") for the role-announcement chunk
             const initChunk: OpenAI.ChatCompletionChunk = {
               id: messageId,
               object: "chat.completion.chunk",
@@ -490,7 +692,6 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
               }
             }
           } else if (event.type === "message_delta") {
-            // Fix A (streaming): map max_tokens → length
             const finishReason =
               event.delta.stop_reason === "tool_use" ? "tool_calls"
               : event.delta.stop_reason === "end_turn" ? "stop"
@@ -506,8 +707,7 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
             };
             res.write(`data: ${JSON.stringify(finalChunk)}\n\n`);
             (res as any).flush?.();
-
-            // Fix D/E: emit a separate usage-only chunk when the client requested it
+            // Fix D/E: emit usage chunk when client requested it
             if (includeUsageInStream) {
               const usageChunk: OpenAI.ChatCompletionChunk = {
                 id: messageId,
@@ -527,8 +727,17 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
           }
         }
         res.write("data: [DONE]\n\n");
+        // Fix 11: log after stream
+        req.log.info({
+          model,
+          provider: "anthropic",
+          latencyMs: Date.now() - startTs,
+          promptTokens: streamInputTokens,
+          completionTokens: streamOutputTokens,
+          stream: true,
+        }, "Anthropic stream complete");
       } catch (streamErr) {
-        req.log.error({ err: streamErr }, "Anthropic stream error in chat/completions");
+        req.log.error({ err: streamErr, model, provider: "anthropic" }, "Anthropic stream error");
         writeSseError(res, (streamErr as { message?: string }).message ?? "Anthropic stream error");
       } finally {
         clearInterval(keepalive);
@@ -537,25 +746,51 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
       return;
     }
 
-    // Non-streaming: use stream().finalMessage() per Anthropic recommendation
+    // Non-streaming
     try {
-      const finalMsg = await anthropic.messages.stream(anthropicParams).finalMessage();
+      const finalMsg = await withRetry(() =>
+        anthropic.messages.stream(anthropicParams).finalMessage()
+      );
+      req.log.info({
+        model,
+        provider: "anthropic",
+        latencyMs: Date.now() - startTs,
+        promptTokens: finalMsg.usage.input_tokens,
+        completionTokens: finalMsg.usage.output_tokens,
+      }, "Anthropic request complete");
       res.json(convertAnthropicToOpenAI(finalMsg, model));
     } catch (err: unknown) {
       const e = err as { status?: number; message?: string };
-      req.log.error({ err }, "Anthropic error in chat/completions");
+      req.log.error({ err, model, provider: "anthropic" }, "Anthropic error");
       res.status(e.status ?? 500).json({ error: { message: e.message ?? "Internal server error", type: "api_error" } });
     }
     return;
   }
 
+  // ── Gemini ───────────────────────────────────────────────────────────────────
   if (isGeminiModel(model)) {
     const gemini = getGeminiClient();
     const { systemInstruction, contents } = convertMessagesToGemini(rawMessages);
 
-    const geminiConfig: Record<string, unknown> = { maxOutputTokens: maxTokens ?? 8192 };
-    if (temperature !== undefined) geminiConfig.temperature = temperature;
+    // Fix 7: full generationConfig
+    const generationConfig: Record<string, unknown> = { maxOutputTokens: maxTokens ?? 8192 };
+    if (temperature !== undefined) generationConfig.temperature = temperature;
+    if (topP !== undefined) generationConfig.topP = topP;
+    if (stop != null) {
+      const stopArr = Array.isArray(stop) ? stop : [stop];
+      if (stopArr.length > 0) generationConfig.stopSequences = stopArr;
+    }
+
+    const geminiConfig: Record<string, unknown> = { generationConfig };
     if (systemInstruction) geminiConfig.systemInstruction = systemInstruction;
+    // Fix 4: Gemini tool calling
+    if (tools && toolChoice !== "none") {
+      geminiConfig.tools = convertToolsToGemini(tools);
+      const tc = convertToolChoiceToGemini(toolChoice);
+      if (tc) geminiConfig.toolConfig = tc;
+    }
+
+    const startTs = Date.now();
 
     if (stream) {
       const keepalive = setupSseHeaders(req, res, () => {
@@ -565,37 +800,114 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
       req.on("close", () => clearInterval(keepalive));
 
       const msgId = `chatcmpl-${Date.now()}`;
+      let geminiInputTokens = 0;
+      let geminiOutputTokens = 0;
+      let currentToolIndex = -1;
+
       try {
+        // Fix 8: content: null for init chunk
         const initChunk: OpenAI.ChatCompletionChunk = {
-          id: msgId, object: "chat.completion.chunk",
-          created: Math.floor(Date.now() / 1000), model,
-          choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null, logprobs: null }],
+          id: msgId,
+          object: "chat.completion.chunk",
+          created: Math.floor(Date.now() / 1000),
+          model,
+          choices: [{ index: 0, delta: { role: "assistant", content: null }, finish_reason: null, logprobs: null }],
         };
         res.write(`data: ${JSON.stringify(initChunk)}\n\n`);
 
-        const geminiStream = await gemini.models.generateContentStream({ model, contents, config: geminiConfig });
+        const geminiStream = await withRetry(() =>
+          gemini.models.generateContentStream({ model, contents, config: geminiConfig })
+        );
+
         for await (const chunk of geminiStream) {
-          const text = (chunk as any).text as string | undefined;
-          if (text) {
-            const textChunk: OpenAI.ChatCompletionChunk = {
-              id: msgId, object: "chat.completion.chunk",
-              created: Math.floor(Date.now() / 1000), model,
-              choices: [{ index: 0, delta: { content: text }, finish_reason: null, logprobs: null }],
+          const candidate = (chunk as any).candidates?.[0];
+          const parts = candidate?.content?.parts ?? [];
+
+          for (const part of parts) {
+            if (part.text) {
+              const textChunk: OpenAI.ChatCompletionChunk = {
+                id: msgId,
+                object: "chat.completion.chunk",
+                created: Math.floor(Date.now() / 1000),
+                model,
+                choices: [{ index: 0, delta: { content: part.text }, finish_reason: null, logprobs: null }],
+              };
+              res.write(`data: ${JSON.stringify(textChunk)}\n\n`);
+              (res as any).flush?.();
+            } else if (part.functionCall) {
+              currentToolIndex++;
+              const callId = `call_${Date.now()}_${currentToolIndex}`;
+              const toolStartChunk: OpenAI.ChatCompletionChunk = {
+                id: msgId,
+                object: "chat.completion.chunk",
+                created: Math.floor(Date.now() / 1000),
+                model,
+                choices: [{
+                  index: 0,
+                  delta: {
+                    tool_calls: [{
+                      index: currentToolIndex,
+                      id: callId,
+                      type: "function",
+                      function: { name: part.functionCall.name, arguments: JSON.stringify(part.functionCall.args ?? {}) },
+                    }],
+                  },
+                  finish_reason: null,
+                  logprobs: null,
+                }],
+              };
+              res.write(`data: ${JSON.stringify(toolStartChunk)}\n\n`);
+              (res as any).flush?.();
+            }
+          }
+
+          // Fix 5: collect token usage
+          const meta = (chunk as any).usageMetadata;
+          if (meta) {
+            geminiInputTokens = meta.promptTokenCount ?? geminiInputTokens;
+            geminiOutputTokens = meta.candidatesTokenCount ?? geminiOutputTokens;
+          }
+
+          if (candidate?.finishReason) {
+            const finishReason = currentToolIndex >= 0 ? "tool_calls" : mapGeminiFinishReason(candidate.finishReason);
+            const doneChunk: OpenAI.ChatCompletionChunk = {
+              id: msgId,
+              object: "chat.completion.chunk",
+              created: Math.floor(Date.now() / 1000),
+              model,
+              choices: [{ index: 0, delta: {}, finish_reason: finishReason, logprobs: null }],
             };
-            res.write(`data: ${JSON.stringify(textChunk)}\n\n`);
+            res.write(`data: ${JSON.stringify(doneChunk)}\n\n`);
+            // Fix D/E equivalent for Gemini
+            if (includeUsageInStream) {
+              const usageChunk: OpenAI.ChatCompletionChunk = {
+                id: msgId,
+                object: "chat.completion.chunk",
+                created: Math.floor(Date.now() / 1000),
+                model,
+                choices: [],
+                usage: {
+                  prompt_tokens: geminiInputTokens,
+                  completion_tokens: geminiOutputTokens,
+                  total_tokens: geminiInputTokens + geminiOutputTokens,
+                },
+              };
+              res.write(`data: ${JSON.stringify(usageChunk)}\n\n`);
+            }
             (res as any).flush?.();
           }
         }
 
-        const doneChunk: OpenAI.ChatCompletionChunk = {
-          id: msgId, object: "chat.completion.chunk",
-          created: Math.floor(Date.now() / 1000), model,
-          choices: [{ index: 0, delta: {}, finish_reason: "stop", logprobs: null }],
-        };
-        res.write(`data: ${JSON.stringify(doneChunk)}\n\n`);
         res.write("data: [DONE]\n\n");
+        req.log.info({
+          model, provider: "gemini",
+          latencyMs: Date.now() - startTs,
+          promptTokens: geminiInputTokens,
+          completionTokens: geminiOutputTokens,
+          stream: true,
+        }, "Gemini stream complete");
       } catch (streamErr) {
-        req.log.error({ err: streamErr }, "Gemini stream error in chat/completions");
+        req.log.error({ err: streamErr, model, provider: "gemini" }, "Gemini stream error");
         writeSseError(res, (streamErr as { message?: string }).message ?? "Gemini stream error");
       } finally {
         clearInterval(keepalive);
@@ -604,9 +916,45 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
       return;
     }
 
+    // Gemini non-streaming
     try {
-      const response = await gemini.models.generateContent({ model, contents, config: geminiConfig });
-      const text = (response as any).text as string ?? "";
+      const response = await withRetry(() =>
+        gemini.models.generateContent({ model, contents, config: geminiConfig })
+      );
+      const candidate = (response as any).candidates?.[0];
+      const parts = candidate?.content?.parts ?? [];
+      const meta = (response as any).usageMetadata;
+
+      // Fix 4: handle tool calls in non-streaming response
+      const toolCalls: OpenAI.ChatCompletionMessageToolCall[] = [];
+      let textContent = "";
+      for (const part of parts) {
+        if (part.text) {
+          textContent += part.text;
+        } else if (part.functionCall) {
+          toolCalls.push({
+            id: `call_${Date.now()}_${toolCalls.length}`,
+            type: "function",
+            function: {
+              name: part.functionCall.name,
+              arguments: JSON.stringify(part.functionCall.args ?? {}),
+            },
+          });
+        }
+      }
+
+      const finishReason = toolCalls.length > 0 ? "tool_calls" : mapGeminiFinishReason(candidate?.finishReason);
+      const message: OpenAI.ChatCompletionMessage = {
+        role: "assistant",
+        content: textContent || null,
+        refusal: null,
+      };
+      if (toolCalls.length > 0) message.tool_calls = toolCalls;
+
+      // Fix 5: real usage from usageMetadata
+      const promptTokens = meta?.promptTokenCount ?? 0;
+      const completionTokens = meta?.candidatesTokenCount ?? 0;
+
       const result: OpenAI.ChatCompletion = {
         id: `chatcmpl-${Date.now()}`,
         object: "chat.completion",
@@ -614,16 +962,22 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
         model,
         choices: [{
           index: 0,
-          message: { role: "assistant", content: text, refusal: null },
-          finish_reason: "stop",
+          message,
+          finish_reason: finishReason,
           logprobs: null,
         }],
-        usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+        usage: { prompt_tokens: promptTokens, completion_tokens: completionTokens, total_tokens: promptTokens + completionTokens },
       };
+
+      req.log.info({
+        model, provider: "gemini",
+        latencyMs: Date.now() - startTs,
+        promptTokens, completionTokens,
+      }, "Gemini request complete");
       res.json(result);
     } catch (err: unknown) {
       const e = err as { status?: number; message?: string };
-      req.log.error({ err }, "Gemini error in chat/completions");
+      req.log.error({ err, model, provider: "gemini" }, "Gemini error");
       res.status(e.status ?? 500).json({ error: { message: e.message ?? "Internal server error", type: "api_error" } });
     }
     return;
@@ -646,7 +1000,6 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
 
   if (isAnthropicModel(model)) {
     const anthropic = getAnthropicClient();
-    // Build clean params — strip any OpenAI-only fields
     const anthropicParams: Anthropic.MessageCreateParamsNonStreaming = {
       model,
       max_tokens: body.max_tokens ?? 8192,
@@ -656,6 +1009,8 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
     if (body.tools) anthropicParams.tools = body.tools;
     if (body.tool_choice) anthropicParams.tool_choice = body.tool_choice;
     if (body.temperature !== undefined) anthropicParams.temperature = body.temperature;
+    if ((body as any).top_p !== undefined) (anthropicParams as any).top_p = (body as any).top_p;
+    if ((body as any).stop_sequences) (anthropicParams as any).stop_sequences = (body as any).stop_sequences;
 
     if (stream) {
       const keepalive = setupSseHeaders(req, res, () => {
@@ -671,7 +1026,7 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
           (res as any).flush?.();
         }
       } catch (streamErr) {
-        req.log.error({ err: streamErr }, "Anthropic stream error in messages");
+        req.log.error({ err: streamErr, model, provider: "anthropic" }, "Anthropic native stream error");
         try {
           const errObj = { type: "error", error: { type: "api_error", message: (streamErr as { message?: string }).message ?? "Stream error" } };
           res.write(`event: error\ndata: ${JSON.stringify(errObj)}\n\n`);
@@ -684,11 +1039,13 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
     }
 
     try {
-      const finalMsg = await anthropic.messages.stream(anthropicParams).finalMessage();
+      const finalMsg = await withRetry(() =>
+        anthropic.messages.stream(anthropicParams).finalMessage()
+      );
       res.json(finalMsg);
     } catch (err: unknown) {
       const e = err as { status?: number; message?: string };
-      req.log.error({ err }, "Anthropic error in messages");
+      req.log.error({ err, model, provider: "anthropic" }, "Anthropic native error");
       res.status(e.status ?? 500).json({ type: "error", error: { type: "api_error", message: e.message ?? "Internal server error" } });
     }
     return;
@@ -697,7 +1054,6 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
   if (isOpenAIModel(model)) {
     const openai = getOpenAIClient();
 
-    // Convert Anthropic-format messages → OpenAI messages
     const openAIMessages: OpenAI.ChatCompletionMessageParam[] = [];
     if (body.system) {
       const sysText = typeof body.system === "string" ? body.system
@@ -784,7 +1140,9 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
         res.write(`event: ping\ndata: ${JSON.stringify({ type: "ping" })}\n\n`);
         (res as any).flush?.();
 
-        const openAIStream = await openai.chat.completions.create({ ...openAIParams, stream: true });
+        const openAIStream = await withRetry(() =>
+          openai.chat.completions.create({ ...openAIParams, stream: true })
+        );
         let currentToolIndex = -1;
         let toolBlocks: { id: string; name: string }[] = [];
         let outputTokens = 0;
@@ -833,7 +1191,7 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
           }
         }
       } catch (streamErr) {
-        req.log.error({ err: streamErr }, "OpenAI stream error in messages");
+        req.log.error({ err: streamErr, model, provider: "openai" }, "OpenAI→Anthropic stream error in /messages");
         try {
           const errObj = { type: "error", error: { type: "api_error", message: (streamErr as { message?: string }).message ?? "Stream error" } };
           res.write(`event: error\ndata: ${JSON.stringify(errObj)}\n\n`);
@@ -846,7 +1204,9 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
     }
 
     try {
-      const openAIResult = await openai.chat.completions.create({ ...openAIParams, stream: false }) as OpenAI.ChatCompletion;
+      const openAIResult = await withRetry(() =>
+        openai.chat.completions.create({ ...openAIParams, stream: false })
+      ) as OpenAI.ChatCompletion;
       const choice = openAIResult.choices[0];
       const content: Anthropic.ContentBlock[] = [];
       if (choice.message.content) content.push({ type: "text", text: choice.message.content });
@@ -869,7 +1229,7 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
       res.json(anthropicResponse);
     } catch (err: unknown) {
       const e = err as { status?: number; message?: string };
-      req.log.error({ err }, "OpenAI error in messages");
+      req.log.error({ err, model, provider: "openai" }, "OpenAI error in /messages");
       res.status(e.status ?? 500).json({ type: "error", error: { type: "api_error", message: e.message ?? "Internal server error" } });
     }
     return;
@@ -903,9 +1263,12 @@ router.post("/responses", requireAuth, async (req: Request, res: Response) => {
   const baseUrl = (process.env.AI_INTEGRATIONS_OPENAI_BASE_URL ?? "").replace(/\/+$/, "");
   const apiKey = process.env.AI_INTEGRATIONS_OPENAI_API_KEY ?? "";
 
+  const { controller, clear } = makeAbortController();
+  req.on("close", clear);
+
   let upstream: globalThis.Response;
   try {
-    upstream = await fetch(`${baseUrl}/responses`, {
+    upstream = await withRetry(() => fetch(`${baseUrl}/responses`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -913,9 +1276,11 @@ router.post("/responses", requireAuth, async (req: Request, res: Response) => {
         "Accept": stream ? "text/event-stream" : "application/json",
       },
       body: JSON.stringify(body),
-    });
+      signal: controller.signal,
+    }));
   } catch (fetchErr) {
-    req.log.error({ err: fetchErr }, "Responses API fetch error");
+    clear();
+    req.log.error({ err: fetchErr, model, provider: "openai" }, "Responses API fetch error");
     res.status(502).json({ error: { message: "Upstream request failed", type: "api_error" } });
     return;
   }
@@ -928,6 +1293,7 @@ router.post("/responses", requireAuth, async (req: Request, res: Response) => {
     res.flushHeaders();
 
     if (!upstream.body) {
+      clear();
       res.end();
       return;
     }
@@ -942,8 +1308,9 @@ router.post("/responses", requireAuth, async (req: Request, res: Response) => {
         (res as any).flush?.();
       }
     } catch (streamErr) {
-      req.log.error({ err: streamErr }, "Responses API stream error");
+      req.log.error({ err: streamErr, model, provider: "openai" }, "Responses API stream error");
     } finally {
+      clear();
       res.end();
     }
     return;
@@ -951,9 +1318,11 @@ router.post("/responses", requireAuth, async (req: Request, res: Response) => {
 
   try {
     const data = await upstream.json() as unknown;
+    clear();
     res.status(upstream.status).json(data);
   } catch (err) {
-    req.log.error({ err }, "Responses API non-stream error");
+    clear();
+    req.log.error({ err, model, provider: "openai" }, "Responses API non-stream error");
     res.status(upstream.status || 500).json({ error: { message: "Upstream error", type: "api_error" } });
   }
 });
