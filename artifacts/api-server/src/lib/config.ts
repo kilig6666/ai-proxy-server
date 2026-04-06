@@ -6,6 +6,7 @@ import { fileURLToPath } from "url";
 export interface AppConfig {
   proxyApiKey: string;
   portalPassword: string;
+  openaiDirectKey: string;
 }
 
 const CONFIG_PATH = path.resolve(
@@ -16,6 +17,7 @@ const CONFIG_PATH = path.resolve(
 const DEFAULTS: AppConfig = {
   proxyApiKey: process.env.PROXY_API_KEY ?? "admin123",
   portalPassword: process.env.PORTAL_PASSWORD ?? "admin123",
+  openaiDirectKey: process.env.OPENAI_DIRECT_KEY ?? "",
 };
 
 function loadConfig(): AppConfig {

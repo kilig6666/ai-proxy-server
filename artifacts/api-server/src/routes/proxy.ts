@@ -3,6 +3,7 @@ import OpenAI from "openai";
 import Anthropic from "@anthropic-ai/sdk";
 import { GoogleGenAI } from "@google/genai";
 import { getConfig } from "../lib/config.js";
+import { fetchCredits, buildCreditsJson } from "../lib/credits.js";
 
 const router: IRouter = Router();
 
@@ -473,6 +474,21 @@ router.get("/models", requireAuth, (_req: Request, res: Response) => {
     { id: "gemini-2.5-flash", object: "model", created: now, owned_by: "google" },
   ];
   res.json({ object: "list", data: models });
+});
+
+// ─── GET /v1/credits ──────────────────────────────────────────────────────────
+
+router.get("/credits", requireAuth, async (_req: Request, res: Response) => {
+  const result = await fetchCredits();
+  if (result.needsKey) {
+    res.json({ needs_key: true, error: result.error });
+    return;
+  }
+  if (!result.ok) {
+    res.status(503).json({ error: result.error ?? "Credits unavailable" });
+    return;
+  }
+  res.json(buildCreditsJson(result));
 });
 
 // ─── POST /v1/chat/completions ────────────────────────────────────────────────
