@@ -480,10 +480,6 @@ router.get("/models", requireAuth, (_req: Request, res: Response) => {
 
 router.get("/credits", requireAuth, async (_req: Request, res: Response) => {
   const result = await fetchCredits();
-  if (result.needsKey) {
-    res.json({ needs_key: true, error: result.error });
-    return;
-  }
   if (!result.ok) {
     res.status(503).json({ error: result.error ?? "Credits unavailable" });
     return;

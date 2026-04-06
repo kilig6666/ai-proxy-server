@@ -30,10 +30,7 @@ router.get("/config/settings", (req: Request, res: Response) => {
     return;
   }
   const cfg = getConfig();
-  res.json({
-    proxyApiKey: cfg.proxyApiKey,
-    openaiDirectKeySet: !!(cfg.openaiDirectKey?.trim()),
-  });
+  res.json({ proxyApiKey: cfg.proxyApiKey });
 });
 
 router.post("/config/settings", (req: Request, res: Response) => {
@@ -42,19 +39,16 @@ router.post("/config/settings", (req: Request, res: Response) => {
     res.status(401).json({ error: "Unauthorized" });
     return;
   }
-  const { proxyApiKey, portalPassword, openaiDirectKey } = req.body as {
-    proxyApiKey?: string; portalPassword?: string; openaiDirectKey?: string;
-  };
-  const updates: Partial<{ proxyApiKey: string; portalPassword: string; openaiDirectKey: string }> = {};
+  const { proxyApiKey, portalPassword } = req.body as { proxyApiKey?: string; portalPassword?: string };
+  const updates: Partial<{ proxyApiKey: string; portalPassword: string }> = {};
   if (proxyApiKey && proxyApiKey.trim()) updates.proxyApiKey = proxyApiKey.trim();
   if (portalPassword && portalPassword.trim()) updates.portalPassword = portalPassword.trim();
-  if (openaiDirectKey !== undefined) updates.openaiDirectKey = openaiDirectKey.trim();
   if (Object.keys(updates).length === 0) {
     res.status(400).json({ error: "No valid fields to update" });
     return;
   }
   const cfg = updateConfig(updates);
-  res.json({ ok: true, proxyApiKey: cfg.proxyApiKey, openaiDirectKeySet: !!(cfg.openaiDirectKey?.trim()) });
+  res.json({ ok: true, proxyApiKey: cfg.proxyApiKey });
 });
 
 router.get("/credits", async (req: Request, res: Response) => {
@@ -64,10 +58,6 @@ router.get("/credits", async (req: Request, res: Response) => {
     return;
   }
   const result = await fetchCredits();
-  if (result.needsKey) {
-    res.json({ needs_key: true, error: result.error });
-    return;
-  }
   if (!result.ok) {
     res.status(503).json({ error: result.error ?? "Credits unavailable" });
     return;

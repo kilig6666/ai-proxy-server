@@ -1,5 +1,3 @@
-import { getConfig } from "./config.js";
-
 export interface CreditsData {
   totalGranted: number;
   remaining: number;
@@ -13,7 +11,6 @@ export interface CreditsResult {
   data?: CreditsData;
   error?: string;
   partial?: boolean;
-  needsKey?: boolean;
 }
 
 interface GrantsResponse {
@@ -26,17 +23,18 @@ interface UsageResponse {
   total_usage?: number;
 }
 
+function getIntegrationConfig(): { baseUrl: string; apiKey: string } {
+  const rawBase = process.env.AI_INTEGRATIONS_OPENAI_BASE_URL ?? "https://api.openai.com/v1";
+  const baseUrl = rawBase.replace(/\/v1\/?$/, "");
+  const apiKey = process.env.AI_INTEGRATIONS_OPENAI_API_KEY ?? "";
+  return { baseUrl, apiKey };
+}
+
 export async function fetchCredits(): Promise<CreditsResult> {
-  const cfg = getConfig();
-  const directKey = cfg.openaiDirectKey?.trim();
+  const { baseUrl, apiKey } = getIntegrationConfig();
 
-  if (!directKey) {
-    return { ok: false, needsKey: true, error: "No OpenAI API key configured for billing. Please add your OpenAI API Key in Settings." };
-  }
-
-  const rootUrl = "https://api.openai.com";
   const headers: Record<string, string> = {
-    Authorization: `Bearer ${directKey}`,
+    Authorization: `Bearer ${apiKey}`,
     "Content-Type": "application/json",
   };
 
@@ -53,7 +51,7 @@ export async function fetchCredits(): Promise<CreditsResult> {
   let usageError: string | null = null;
 
   try {
-    const res = await fetch(`${rootUrl}/dashboard/billing/credit_grants`, { headers });
+    const res = await fetch(`${baseUrl}/dashboard/billing/credit_grants`, { headers });
     if (res.ok) {
       grants = (await res.json()) as GrantsResponse;
     } else {
@@ -65,7 +63,7 @@ export async function fetchCredits(): Promise<CreditsResult> {
   }
 
   try {
-    const usageUrl = `${rootUrl}/dashboard/billing/usage?start_date=${startDate}&end_date=${endDate}`;
+    const usageUrl = `${baseUrl}/dashboard/billing/usage?start_date=${startDate}&end_date=${endDate}`;
     const res = await fetch(usageUrl, { headers });
     if (res.ok) {
       const data = (await res.json()) as UsageResponse;
@@ -79,7 +77,7 @@ export async function fetchCredits(): Promise<CreditsResult> {
   }
 
   if (grantError && usageError) {
-    return { ok: false, error: `Billing API error — grants: ${grantError}; usage: ${usageError}` };
+    return { ok: false, error: `Billing API unavailable — grants: ${grantError}; usage: ${usageError}` };
   }
 
   const totalGranted = grants?.total_granted ?? 0;
@@ -102,11 +100,7 @@ export async function fetchCredits(): Promise<CreditsResult> {
 
 export function buildCreditsJson(result: CreditsResult): Record<string, unknown> {
   if (!result.ok || !result.data) {
-    return {
-      error: result.error ?? "unknown error",
-      needs_key: result.needsKey ?? false,
-      partial: false,
-    };
+    return { error: result.error ?? "unknown error", partial: false };
   }
   const d = result.data;
   return {
