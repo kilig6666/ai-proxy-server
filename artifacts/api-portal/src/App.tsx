@@ -178,7 +178,7 @@ function ModelGroup({ title, models, color, bg, C }: { title: string; models: { 
   );
 }
 
-function LoginPage({ C, onLogin }: { C: Record<string, string>; onLogin: (token: string) => void }) {
+function LoginPage({ C, onLogin }: { C: Record<string, string>; onLogin: (token: string, proxyApiKey: string) => void }) {
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -198,8 +198,8 @@ function LoginPage({ C, onLogin }: { C: Record<string, string>; onLogin: (token:
         setLoading(false);
         return;
       }
-      const data = await res.json() as { token: string };
-      onLogin(data.token);
+      const data = await res.json() as { token: string; proxyApiKey: string };
+      onLogin(data.token, data.proxyApiKey);
     } catch {
       setError("连接服务器失败，请稍后重试");
       setLoading(false);
@@ -589,13 +589,11 @@ export default function App() {
       .catch(() => { localStorage.removeItem("portalToken"); setAuthChecked(true); });
   }, []);
 
-  const handleLogin = (token: string) => {
+  const handleLogin = (token: string, key: string) => {
     localStorage.setItem("portalToken", token);
     setAdminToken(token);
+    setProxyApiKey(key);
     setAuthed(true);
-    fetch("/api/config/settings", { headers: { "Authorization": `Bearer ${token}` } })
-      .then(async (r) => { if (r.ok) { const d = await r.json() as { proxyApiKey: string }; setProxyApiKey(d.proxyApiKey); } })
-      .catch(() => {});
   };
 
   const handleLogout = async () => {

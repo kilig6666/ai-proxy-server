@@ -11,7 +11,7 @@ router.post("/config/login", (req: Request, res: Response) => {
     return;
   }
   const token = createAdminToken();
-  res.json({ token });
+  res.json({ token, proxyApiKey: cfg.proxyApiKey });
 });
 
 router.post("/config/logout", (req: Request, res: Response) => {
