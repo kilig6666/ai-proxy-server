@@ -4,6 +4,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { GoogleGenAI } from "@google/genai";
 import { getConfig } from "../lib/config.js";
 import { fetchCredits, buildCreditsJson } from "../lib/credits.js";
+import { normalizeSamplingParams } from "../lib/sampling.js";
 
 const router: IRouter = Router();
 
@@ -159,6 +160,25 @@ type GeminiPart =
 
 type GeminiContent = { role: string; parts: GeminiPart[] };
 
+type OpenAIFunctionTool = OpenAI.ChatCompletionFunctionTool;
+type OpenAIFunctionToolCall = OpenAI.ChatCompletionMessageFunctionToolCall;
+
+type AnthropicClientResponseBlock =
+  | Anthropic.TextBlockParam
+  | Anthropic.ToolUseBlockParam;
+
+function isOpenAIFunctionTool(tool: OpenAI.ChatCompletionTool): tool is OpenAIFunctionTool {
+  return tool.type === "function" && "function" in tool;
+}
+
+function isOpenAIFunctionToolCall(toolCall: OpenAI.ChatCompletionMessageToolCall): toolCall is OpenAIFunctionToolCall {
+  return toolCall.type === "function" && "function" in toolCall;
+}
+
+function isAnthropicToolDefinition(tool: Anthropic.ToolUnion): tool is Anthropic.Tool {
+  return "input_schema" in tool;
+}
+
 function convertMessagesToGemini(messages: OpenAI.ChatCompletionMessageParam[]): {
   systemInstruction?: string;
   contents: GeminiContent[];
@@ -171,7 +191,7 @@ function convertMessagesToGemini(messages: OpenAI.ChatCompletionMessageParam[]):
   for (const msg of messages) {
     if (msg.role === "assistant" && msg.tool_calls) {
       for (const tc of msg.tool_calls) {
-        toolCallNameMap.set(tc.id, tc.function.name);
+        if (isOpenAIFunctionToolCall(tc)) toolCallNameMap.set(tc.id, tc.function.name);
       }
     }
   }
@@ -207,6 +227,7 @@ function convertMessagesToGemini(messages: OpenAI.ChatCompletionMessageParam[]):
       if (msg.tool_calls) {
         for (const tc of msg.tool_calls) {
           let args: Record<string, unknown> = {};
+          if (!isOpenAIFunctionToolCall(tc)) continue;
           try { args = JSON.parse(tc.function.arguments); } catch {}
           parts.push({ functionCall: { name: tc.function.name, args } });
         }
@@ -243,9 +264,9 @@ function convertMessagesToGemini(messages: OpenAI.ChatCompletionMessageParam[]):
 function convertToolsToGemini(tools: OpenAI.ChatCompletionTool[]): Record<string, unknown>[] {
   return [{
     functionDeclarations: tools.map(t => ({
-      name: t.function.name,
-      description: t.function.description ?? "",
-      parameters: t.function.parameters ?? { type: "object", properties: {} },
+      name: isOpenAIFunctionTool(t) ? t.function.name : t.custom.name,
+      description: isOpenAIFunctionTool(t) ? (t.function.description ?? "") : (t.custom.description ?? ""),
+      parameters: isOpenAIFunctionTool(t) ? (t.function.parameters ?? { type: "object", properties: {} }) : { type: "object", properties: { input: { type: "string" } } },
     })),
   }];
 }
@@ -266,9 +287,11 @@ function convertToolChoiceToGemini(
 
 function convertToolsToAnthropic(tools: OpenAI.ChatCompletionTool[]): Anthropic.Tool[] {
   return tools.map((t) => ({
-    name: t.function.name,
-    description: t.function.description,
-    input_schema: (t.function.parameters as Anthropic.Tool["input_schema"]),
+    name: isOpenAIFunctionTool(t) ? t.function.name : t.custom.name,
+    description: isOpenAIFunctionTool(t) ? t.function.description : t.custom.description,
+    input_schema: (isOpenAIFunctionTool(t)
+      ? t.function.parameters
+      : { type: "object", properties: { input: { type: "string" } } }) as Anthropic.Tool["input_schema"],
   }));
 }
 
@@ -319,12 +342,13 @@ function convertMessagesToAnthropic(
 
     if (msg.role === "assistant") {
       if (msg.tool_calls && msg.tool_calls.length > 0) {
-        const content: Anthropic.ContentBlock[] = [];
+        const content: Anthropic.ContentBlockParam[] = [];
         if (msg.content) {
           content.push({ type: "text", text: typeof msg.content === "string" ? msg.content : "" });
         }
         for (const tc of msg.tool_calls) {
           let input: Record<string, unknown> = {};
+          if (!isOpenAIFunctionToolCall(tc)) continue;
           try { input = JSON.parse(tc.function.arguments); } catch { input = {}; }
           content.push({ type: "tool_use", id: tc.id, name: tc.function.name, input });
         }
@@ -367,6 +391,77 @@ function convertMessagesToAnthropic(
   }
 
   return { system, messages: converted };
+}
+
+type AnthropicPayloadParts = {
+  system?: Anthropic.MessageCreateParamsNonStreaming["system"];
+  messages: Anthropic.MessageParam[];
+  tools?: Anthropic.MessageCreateParamsNonStreaming["tools"];
+};
+
+type AnthropicPayloadSanitizeResult = AnthropicPayloadParts & {
+  removedPaths: string[];
+};
+
+const ALLOWED_ANTHROPIC_CACHE_CONTROL_KEYS = new Set(["type", "ttl"]);
+
+function sanitizeAnthropicNode(node: unknown, path: string, removedPaths: string[]): unknown {
+  if (Array.isArray(node)) {
+    return node.map((item, index) => sanitizeAnthropicNode(item, `${path}.${index}`, removedPaths));
+  }
+
+  if (!node || typeof node !== "object") {
+    return node;
+  }
+
+  const input = node as Record<string, unknown>;
+  const output: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(input)) {
+    if (key === "cache_control") {
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        removedPaths.push(`${path}.cache_control`);
+        continue;
+      }
+      const cacheControl = value as Record<string, unknown>;
+      const sanitizedCacheControl: Record<string, unknown> = {};
+      for (const [cacheKey, cacheValue] of Object.entries(cacheControl)) {
+        if (ALLOWED_ANTHROPIC_CACHE_CONTROL_KEYS.has(cacheKey)) {
+          sanitizedCacheControl[cacheKey] = cacheValue;
+        } else {
+          removedPaths.push(`${path}.cache_control.${cacheKey}`);
+        }
+      }
+      if (Object.keys(sanitizedCacheControl).length > 0) {
+        output[key] = sanitizedCacheControl;
+      } else {
+        removedPaths.push(`${path}.cache_control`);
+      }
+      continue;
+    }
+
+    output[key] = sanitizeAnthropicNode(value, `${path}.${key}`, removedPaths);
+  }
+
+  return output;
+}
+
+function sanitizeAnthropicPayload(parts: AnthropicPayloadParts): AnthropicPayloadSanitizeResult {
+  const removedPaths: string[] = [];
+  const result: AnthropicPayloadSanitizeResult = {
+    messages: sanitizeAnthropicNode(parts.messages, "messages", removedPaths) as Anthropic.MessageParam[],
+    removedPaths,
+  };
+
+  if (parts.system !== undefined) {
+    result.system = sanitizeAnthropicNode(parts.system, "system", removedPaths) as Anthropic.MessageCreateParamsNonStreaming["system"];
+  }
+
+  if (parts.tools) {
+    result.tools = sanitizeAnthropicNode(parts.tools, "tools", removedPaths) as Anthropic.MessageCreateParamsNonStreaming["tools"];
+  }
+
+  return result;
 }
 
 function convertAnthropicToOpenAI(anthropicMsg: Anthropic.Message, model: string): OpenAI.ChatCompletion {
@@ -508,12 +603,14 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
   const tools = body.tools as OpenAI.ChatCompletionTool[] | undefined;
   const toolChoice = body.tool_choice as OpenAI.ChatCompletionCreateParams["tool_choice"] | undefined;
   // Fix 7: extract all common sampling params
-  const temperature = body.temperature as number | undefined;
+  const samplingInput = {
+    temperature: body.temperature as number | undefined,
+    topP: body.top_p as number | undefined,
+    frequencyPenalty: body.frequency_penalty as number | undefined,
+    presencePenalty: body.presence_penalty as number | undefined,
+  };
   const maxTokens = body.max_tokens as number | undefined;
-  const topP = body.top_p as number | undefined;
   const stop = body.stop as string | string[] | null | undefined;
-  const presencePenalty = body.presence_penalty as number | undefined;
-  const frequencyPenalty = body.frequency_penalty as number | undefined;
   // Fix 9: preserve stream_options for OpenAI pass-through; detect include_usage for Anthropic/Gemini
   const streamOpts = body.stream_options as { include_usage?: boolean } | undefined;
   const includeUsageInStream = Boolean(streamOpts?.include_usage);
@@ -525,6 +622,8 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
 
   // ── OpenAI ──────────────────────────────────────────────────────────────────
   if (isOpenAIModel(model)) {
+    const sampling = normalizeSamplingParams("openai", samplingInput);
+
     const openAIParams: OpenAI.ChatCompletionCreateParams = {
       model,
       messages: rawMessages,
@@ -532,15 +631,15 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
     };
     if (tools) openAIParams.tools = tools;
     if (toolChoice) openAIParams.tool_choice = toolChoice;
-    if (temperature !== undefined) openAIParams.temperature = temperature;
+    if (sampling.temperature !== undefined) openAIParams.temperature = sampling.temperature;
     if (maxTokens !== undefined) openAIParams.max_tokens = maxTokens;
     // Fix 7: forward extra sampling params
-    if (topP !== undefined) openAIParams.top_p = topP;
+    if (sampling.topP !== undefined) openAIParams.top_p = sampling.topP;
     if (stop != null) openAIParams.stop = stop as string | string[];
-    if (presencePenalty !== undefined) openAIParams.presence_penalty = presencePenalty;
-    if (frequencyPenalty !== undefined) openAIParams.frequency_penalty = frequencyPenalty;
+    if (sampling.presencePenalty !== undefined) openAIParams.presence_penalty = sampling.presencePenalty;
+    if (sampling.frequencyPenalty !== undefined) openAIParams.frequency_penalty = sampling.frequencyPenalty;
     // Fix 9: pass stream_options through to OpenAI natively
-    if (stream && streamOpts) (openAIParams as Record<string, unknown>).stream_options = streamOpts;
+    if (stream && streamOpts) (openAIParams as unknown as Record<string, unknown>).stream_options = streamOpts;
 
     const openai = getOpenAIClient();
     const startTs = Date.now();
@@ -600,25 +699,39 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
 
   // ── Anthropic ────────────────────────────────────────────────────────────────
   if (isAnthropicModel(model)) {
+    const sampling = normalizeSamplingParams("anthropic", samplingInput);
+    if (sampling.adjustments.length > 0) {
+      req.log.info({ model, provider: "anthropic", samplingAdjustments: sampling.adjustments }, "Anthropic sampling normalized");
+    }
+
     const anthropic = getAnthropicClient();
     const { system, messages } = convertMessagesToAnthropic(rawMessages);
+    // Fix B: when tool_choice is "none", strip both tools and tool_choice
+    const effectiveToolChoice = toolChoice === "none" ? undefined : toolChoice;
+    const sanitizedAnthropic = sanitizeAnthropicPayload({
+      system,
+      messages,
+      tools: tools && toolChoice !== "none" ? convertToolsToAnthropic(tools) : undefined,
+    });
+
+    if (sanitizedAnthropic.removedPaths.length > 0) {
+      req.log.info({ model, provider: "anthropic", removedPaths: sanitizedAnthropic.removedPaths }, "Sanitized unsupported Anthropic payload fields");
+    }
 
     const anthropicParams: Anthropic.MessageCreateParamsNonStreaming = {
       model,
       max_tokens: maxTokens ?? 8192,
-      messages,
+      messages: sanitizedAnthropic.messages,
     };
-    if (system) anthropicParams.system = system;
-    // Fix B: when tool_choice is "none", strip both tools and tool_choice
-    const effectiveToolChoice = toolChoice === "none" ? undefined : toolChoice;
-    if (tools && toolChoice !== "none") anthropicParams.tools = convertToolsToAnthropic(tools);
+    if (sanitizedAnthropic.system) anthropicParams.system = sanitizedAnthropic.system;
+    if (sanitizedAnthropic.tools) anthropicParams.tools = sanitizedAnthropic.tools;
     if (effectiveToolChoice) anthropicParams.tool_choice = convertToolChoiceToAnthropic(effectiveToolChoice);
-    if (temperature !== undefined) anthropicParams.temperature = temperature;
+    if (sampling.temperature !== undefined) anthropicParams.temperature = sampling.temperature;
     // Fix 7: forward top_p and stop sequences where Anthropic supports them
-    if (topP !== undefined) (anthropicParams as Record<string, unknown>).top_p = topP;
+    if (sampling.topP !== undefined) (anthropicParams as unknown as Record<string, unknown>).top_p = sampling.topP;
     if (stop != null) {
       const stopArr = Array.isArray(stop) ? stop : [stop];
-      if (stopArr.length > 0) (anthropicParams as Record<string, unknown>).stop_sequences = stopArr;
+      if (stopArr.length > 0) (anthropicParams as unknown as Record<string, unknown>).stop_sequences = stopArr;
     }
 
     const startTs = Date.now();
@@ -793,13 +906,18 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
 
   // ── Gemini ───────────────────────────────────────────────────────────────────
   if (isGeminiModel(model)) {
+    const sampling = normalizeSamplingParams("gemini", samplingInput);
+    if (sampling.adjustments.length > 0) {
+      req.log.info({ model, provider: "gemini", samplingAdjustments: sampling.adjustments }, "Gemini sampling normalized");
+    }
+
     const gemini = getGeminiClient();
     const { systemInstruction, contents } = convertMessagesToGemini(rawMessages);
 
     // Fix 7: full generationConfig
     const generationConfig: Record<string, unknown> = { maxOutputTokens: maxTokens ?? 8192 };
-    if (temperature !== undefined) generationConfig.temperature = temperature;
-    if (topP !== undefined) generationConfig.topP = topP;
+    if (sampling.temperature !== undefined) generationConfig.temperature = sampling.temperature;
+    if (sampling.topP !== undefined) generationConfig.topP = sampling.topP;
     if (stop != null) {
       const stopArr = Array.isArray(stop) ? stop : [stop];
       if (stopArr.length > 0) generationConfig.stopSequences = stopArr;
@@ -1016,6 +1134,12 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
   const body = req.body as Anthropic.MessageCreateParams;
   const { model } = body;
   const stream = Boolean(body.stream);
+  const samplingInput = {
+    temperature: body.temperature,
+    topP: (body as any).top_p as number | undefined,
+    frequencyPenalty: (body as any).frequency_penalty as number | undefined,
+    presencePenalty: (body as any).presence_penalty as number | undefined,
+  };
 
   if (!model) {
     res.status(400).json({ type: "error", error: { type: "invalid_request_error", message: "model is required" } });
@@ -1023,17 +1147,32 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
   }
 
   if (isAnthropicModel(model)) {
+    const sampling = normalizeSamplingParams("anthropic", samplingInput);
+    if (sampling.adjustments.length > 0) {
+      req.log.info({ model, provider: "anthropic", samplingAdjustments: sampling.adjustments }, "Anthropic sampling normalized");
+    }
+
     const anthropic = getAnthropicClient();
+    const sanitizedAnthropic = sanitizeAnthropicPayload({
+      system: body.system,
+      messages: body.messages,
+      tools: body.tools,
+    });
+
+    if (sanitizedAnthropic.removedPaths.length > 0) {
+      req.log.info({ model, provider: "anthropic", removedPaths: sanitizedAnthropic.removedPaths }, "Sanitized unsupported Anthropic payload fields");
+    }
+
     const anthropicParams: Anthropic.MessageCreateParamsNonStreaming = {
       model,
       max_tokens: body.max_tokens ?? 8192,
-      messages: body.messages,
+      messages: sanitizedAnthropic.messages,
     };
-    if (body.system) anthropicParams.system = body.system;
-    if (body.tools) anthropicParams.tools = body.tools;
+    if (sanitizedAnthropic.system) anthropicParams.system = sanitizedAnthropic.system;
+    if (sanitizedAnthropic.tools) anthropicParams.tools = sanitizedAnthropic.tools;
     if (body.tool_choice) anthropicParams.tool_choice = body.tool_choice;
-    if (body.temperature !== undefined) anthropicParams.temperature = body.temperature;
-    if ((body as any).top_p !== undefined) (anthropicParams as any).top_p = (body as any).top_p;
+    if (sampling.temperature !== undefined) anthropicParams.temperature = sampling.temperature;
+    if (sampling.topP !== undefined) (anthropicParams as any).top_p = sampling.topP;
     if ((body as any).stop_sequences) (anthropicParams as any).stop_sequences = (body as any).stop_sequences;
 
     if (stream) {
@@ -1076,6 +1215,8 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
   }
 
   if (isOpenAIModel(model)) {
+    const sampling = normalizeSamplingParams("openai", samplingInput);
+
     const openai = getOpenAIClient();
 
     const openAIMessages: OpenAI.ChatCompletionMessageParam[] = [];
@@ -1124,14 +1265,16 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
       }
     }
 
-    const openAITools: OpenAI.ChatCompletionTool[] | undefined = body.tools?.map((t) => ({
-      type: "function" as const,
-      function: {
-        name: t.name,
-        description: t.description,
-        parameters: (t as Anthropic.Tool).input_schema,
-      },
-    }));
+    const openAITools: OpenAI.ChatCompletionTool[] | undefined = body.tools
+      ?.filter(isAnthropicToolDefinition)
+      .map((t) => ({
+        type: "function" as const,
+        function: {
+          name: t.name,
+          description: t.description,
+          parameters: t.input_schema,
+        },
+      }));
 
     let openAIToolChoice: OpenAI.ChatCompletionCreateParams["tool_choice"] | undefined;
     if (body.tool_choice) {
@@ -1147,6 +1290,10 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
       stream: false,
     };
     if (body.max_tokens) openAIParams.max_tokens = body.max_tokens;
+    if (sampling.temperature !== undefined) openAIParams.temperature = sampling.temperature;
+    if (sampling.topP !== undefined) openAIParams.top_p = sampling.topP;
+    if (sampling.frequencyPenalty !== undefined) openAIParams.frequency_penalty = sampling.frequencyPenalty;
+    if (sampling.presencePenalty !== undefined) openAIParams.presence_penalty = sampling.presencePenalty;
     if (openAITools) openAIParams.tools = openAITools;
     if (openAIToolChoice) openAIParams.tool_choice = openAIToolChoice;
 
@@ -1232,17 +1379,18 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
         openai.chat.completions.create({ ...openAIParams, stream: false })
       ) as OpenAI.ChatCompletion;
       const choice = openAIResult.choices[0];
-      const content: Anthropic.ContentBlock[] = [];
+      const content: AnthropicClientResponseBlock[] = [];
       if (choice.message.content) content.push({ type: "text", text: choice.message.content });
       if (choice.message.tool_calls) {
         for (const tc of choice.message.tool_calls) {
           let input: Record<string, unknown> = {};
+          if (!isOpenAIFunctionToolCall(tc)) continue;
           try { input = JSON.parse(tc.function.arguments); } catch { input = {}; }
           content.push({ type: "tool_use", id: tc.id, name: tc.function.name, input });
         }
       }
       const stopReason = choice.finish_reason === "tool_calls" ? "tool_use" : "end_turn";
-      const anthropicResponse: Anthropic.Message = {
+      const anthropicResponse = {
         id: openAIResult.id, type: "message", role: "assistant", content, model,
         stop_reason: stopReason, stop_sequence: null,
         usage: {
