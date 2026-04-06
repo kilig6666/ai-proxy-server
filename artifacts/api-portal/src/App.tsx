@@ -596,7 +596,7 @@ export default function App() {
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <div style={{ fontSize: 11, fontWeight: 700, color: C.gradientB, background: C.purpleDark, border: `1px solid ${C.purple}`, borderRadius: 6, padding: "2px 7px", letterSpacing: "0.06em", fontFamily: "monospace" }}>v2.2</div>
+          <div style={{ fontSize: 11, fontWeight: 700, color: C.gradientB, background: C.purpleDark, border: `1px solid ${C.purple}`, borderRadius: 6, padding: "2px 7px", letterSpacing: "0.06em", fontFamily: "monospace" }}>v2.3</div>
           <StatusDot online={online} C={C} t={t} />
           <LangToggle lang={lang} setLang={handleSetLang} C={C} />
           <button onClick={() => setDark((d) => !d)} style={{ background: C.bgInput, border: `1px solid ${C.border}`, borderRadius: 8, padding: "5px 10px", fontSize: 17, cursor: "pointer", color: C.text, lineHeight: 1 }}>{dark ? "☀️" : "🌙"}</button>
