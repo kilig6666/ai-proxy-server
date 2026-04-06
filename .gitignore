@@ -53,3 +53,6 @@ Thumbs.db
 .env.*
 *.env
 .proxy-key
+
+# Runtime config (contains secrets)
+artifacts/api-server/config.json

@@ -2,6 +2,7 @@ import { Router, type IRouter, type Request, type Response } from "express";
 import OpenAI from "openai";
 import Anthropic from "@anthropic-ai/sdk";
 import { GoogleGenAI } from "@google/genai";
+import { getConfig } from "../lib/config.js";
 
 const router: IRouter = Router();
 
@@ -100,7 +101,7 @@ function makeAbortController(): { controller: AbortController; clear: () => void
 // ─── Auth + rate-limit middleware ─────────────────────────────────────────────
 
 function requireAuth(req: Request, res: Response, next: () => void) {
-  const proxyKey = process.env.PROXY_API_KEY;
+  const proxyKey = getConfig().proxyApiKey;
   const auth = req.headers.authorization;
   if (!auth || auth !== `Bearer ${proxyKey}`) {
     res.status(401).json({ error: { message: "Unauthorized", type: "authentication_error", code: 401 } });

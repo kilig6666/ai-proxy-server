@@ -35,17 +35,30 @@ Express.js backend serving at `/api` and `/v1`.
 - `claude-*` prefix → Anthropic client (`AI_INTEGRATIONS_ANTHROPIC_BASE_URL`)
 
 ### API Portal (`artifacts/api-portal`)
-Dark-themed React + Vite frontend at `/` showing:
-- Live server status indicator
-- Connection details (base URL + auth header) with copy buttons
-- API endpoints list with method/type badges and copy-URL buttons
-- Available models grid (OpenAI/Anthropic labeled)
-- CherryStudio 4-step setup guide
-- curl quick test example with copy button
+Dark/light-themed React + Vite frontend at `/` with:
+- **Login page** — password gate using `/api/config/login`, token stored in localStorage
+- **Dashboard tab** — live server status, connection details (dynamic proxyApiKey), endpoints, models, curl example
+- **Chat Test tab** — model selector (OpenAI/Anthropic/Gemini grouped), streaming chat via `/v1/chat/completions`
+- **Settings tab** — change PROXY_API_KEY and portal password via `/api/config/settings`
+
+### Config System (`artifacts/api-server/src/lib/config.ts`)
+Runtime config stored in `artifacts/api-server/config.json` (gitignored).
+
+- `getConfig()` — returns `{ proxyApiKey, portalPassword }`
+- `updateConfig(partial)` — updates and persists config
+- Admin tokens: `createAdminToken()`, `validateAdminToken()`, `revokeAdminToken()`
+- Defaults: `proxyApiKey` from `PROXY_API_KEY` env (fallback `981115`), `portalPassword` from `PORTAL_PASSWORD` env (fallback `admin123`)
+
+### Config API (`/api/config/*`)
+- `POST /api/config/login` — verify portal password, return 24h admin token
+- `POST /api/config/logout` — revoke admin token
+- `GET /api/config/settings` — get proxyApiKey (admin token required)
+- `POST /api/config/settings` — update proxyApiKey and/or portalPassword (admin token required)
 
 ## Key Secrets
 
-- `PROXY_API_KEY` — Bearer token required for all `/v1` requests
+- `PROXY_API_KEY` — Default Bearer token (overridden by config.json after first write)
+- `PORTAL_PASSWORD` — Default portal login password (overridden by config.json)
 - `AI_INTEGRATIONS_OPENAI_BASE_URL` + `AI_INTEGRATIONS_OPENAI_API_KEY` — Auto-provisioned by Replit AI Integrations
 - `AI_INTEGRATIONS_ANTHROPIC_BASE_URL` + `AI_INTEGRATIONS_ANTHROPIC_API_KEY` — Auto-provisioned by Replit AI Integrations
 - `SESSION_SECRET` — General session secret
