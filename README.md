@@ -581,45 +581,45 @@ ai-proxy-server/
 
 ### 5.2 OpenAI（16 个）
 
-| 模型 ID | 路由 | Thinking |
-|---|---|---|
-| `gpt-5.4` | `/v1/chat/completions` `/v1/responses` | 支持 |
-| `gpt-5.3-codex` | `/v1/chat/completions` `/v1/responses` | 支持 |
-| `gpt-5.2` | `/v1/chat/completions` `/v1/responses` | 支持 |
-| `gpt-5.2-codex` | `/v1/chat/completions` `/v1/responses` | 支持 |
-| `gpt-5.1` | `/v1/chat/completions` `/v1/responses` | 支持 |
-| `gpt-5` | `/v1/chat/completions` `/v1/responses` | 支持 |
-| `gpt-5-mini` | `/v1/chat/completions` `/v1/responses` | 支持 |
-| `gpt-5-nano` | `/v1/chat/completions` `/v1/responses` | 支持 |
-| `gpt-4.1` | `/v1/chat/completions` `/v1/responses` | 不支持 |
-| `gpt-4.1-mini` | `/v1/chat/completions` `/v1/responses` | 不支持 |
-| `gpt-4.1-nano` | `/v1/chat/completions` `/v1/responses` | 不支持 |
-| `gpt-4o` | `/v1/chat/completions` `/v1/responses` | 不支持 |
-| `gpt-4o-mini` | `/v1/chat/completions` `/v1/responses` | 不支持 |
-| `o4-mini` | `/v1/chat/completions` `/v1/responses` | 支持 |
-| `o3` | `/v1/chat/completions` `/v1/responses` | 支持 |
-| `o3-mini` | `/v1/chat/completions` `/v1/responses` | 支持 |
+| 模型 ID | 路由 | Vision | Thinking |
+|---|---|---|---|
+| `gpt-5.4` | `/v1/chat/completions` `/v1/responses` | 支持 | 支持 |
+| `gpt-5.3-codex` | `/v1/chat/completions` `/v1/responses` | 支持 | 支持 |
+| `gpt-5.2` | `/v1/chat/completions` `/v1/responses` | 支持 | 支持 |
+| `gpt-5.2-codex` | `/v1/chat/completions` `/v1/responses` | 支持 | 支持 |
+| `gpt-5.1` | `/v1/chat/completions` `/v1/responses` | 支持 | 支持 |
+| `gpt-5` | `/v1/chat/completions` `/v1/responses` | 支持 | 支持 |
+| `gpt-5-mini` | `/v1/chat/completions` `/v1/responses` | 支持 | 支持 |
+| `gpt-5-nano` | `/v1/chat/completions` `/v1/responses` | 支持 | 支持 |
+| `gpt-4.1` | `/v1/chat/completions` `/v1/responses` | 支持 | 不支持 |
+| `gpt-4.1-mini` | `/v1/chat/completions` `/v1/responses` | 支持 | 不支持 |
+| `gpt-4.1-nano` | `/v1/chat/completions` `/v1/responses` | 支持 | 不支持 |
+| `gpt-4o` | `/v1/chat/completions` `/v1/responses` | 支持 | 不支持 |
+| `gpt-4o-mini` | `/v1/chat/completions` `/v1/responses` | 支持 | 不支持 |
+| `o4-mini` | `/v1/chat/completions` `/v1/responses` | 支持 | 支持 |
+| `o3` | `/v1/chat/completions` `/v1/responses` | 支持 | 支持 |
+| `o3-mini` | `/v1/chat/completions` `/v1/responses` | 不支持 | 支持 |
 
 ### 5.3 Anthropic（6 个）
 
-| 模型 ID | 路由 | Thinking |
-|---|---|---|
-| `claude-opus-4-6` | `/v1/chat/completions` `/v1/messages` | 支持 |
-| `claude-opus-4-5` | `/v1/chat/completions` `/v1/messages` | 支持 |
-| `claude-opus-4-1` | `/v1/chat/completions` `/v1/messages` | 支持 |
-| `claude-sonnet-4-6` | `/v1/chat/completions` `/v1/messages` | 支持 |
-| `claude-sonnet-4-5` | `/v1/chat/completions` `/v1/messages` | 支持 |
-| `claude-haiku-4-5` | `/v1/chat/completions` `/v1/messages` | 不支持 |
+| 模型 ID | 路由 | Vision | Thinking |
+|---|---|---|---|
+| `claude-opus-4-6` | `/v1/chat/completions` `/v1/messages` | 支持 | 支持 |
+| `claude-opus-4-5` | `/v1/chat/completions` `/v1/messages` | 支持 | 支持 |
+| `claude-opus-4-1` | `/v1/chat/completions` `/v1/messages` | 支持 | 支持 |
+| `claude-sonnet-4-6` | `/v1/chat/completions` `/v1/messages` | 支持 | 支持 |
+| `claude-sonnet-4-5` | `/v1/chat/completions` `/v1/messages` | 支持 | 支持 |
+| `claude-haiku-4-5` | `/v1/chat/completions` `/v1/messages` | 支持 | 不支持 |
 
 ### 5.4 Gemini（5 个）
 
-| 模型 ID | 路由 | Thinking |
-|---|---|---|
-| `gemini-3.1-pro-preview` | `/v1/chat/completions` `/v1/messages` | 支持 |
-| `gemini-3-pro-preview` | `/v1/chat/completions` `/v1/messages` | 支持 |
-| `gemini-3-flash-preview` | `/v1/chat/completions` `/v1/messages` | 支持 |
-| `gemini-2.5-pro` | `/v1/chat/completions` `/v1/messages` | 支持 |
-| `gemini-2.5-flash` | `/v1/chat/completions` `/v1/messages` | 支持 |
+| 模型 ID | 路由 | Vision | Thinking |
+|---|---|---|---|
+| `gemini-3.1-pro-preview` | `/v1/chat/completions` `/v1/messages` | 支持 | 支持 |
+| `gemini-3-pro-preview` | `/v1/chat/completions` `/v1/messages` | 支持 | 支持 |
+| `gemini-3-flash-preview` | `/v1/chat/completions` `/v1/messages` | 支持 | 支持 |
+| `gemini-2.5-pro` | `/v1/chat/completions` `/v1/messages` | 支持 | 支持 |
+| `gemini-2.5-flash` | `/v1/chat/completions` `/v1/messages` | 支持 | 支持 |
 
 ---
 
@@ -677,6 +677,11 @@ x-api-key: <proxyApiKey>
   - tool calls
   - thinking / reasoning 适配
   - 多 provider sampling 兼容
+- 支持图片输入：
+  - `messages[].content[].type = "image_url"`
+  - `image_url.url` 支持 `data:image/...;base64,...`
+  - 对 Gemini 目标模型，也兼容公开 `http(s)` 图片 URL，代理会抓图后转 `inlineData`
+- 如果目标模型不支持视觉能力，携带图片输入会提前返回 `400 invalid_request_error`
 
 ### `POST /v1/messages`
 
@@ -688,6 +693,11 @@ x-api-key: <proxyApiKey>
 - 当最终路由到 Anthropic 时，仅 Claude 4.6 会下发 `output_config.effort`
 - 为兼容 Claude Code，若 `tool_choice.type` 为 `any` / `tool`，代理会自动移除 thinking
 - 支持透传 `anthropic-beta` 请求头，也支持从请求体 `betas` 读取并转发到上游
+- 支持图片输入：
+  - `messages[].content[].type = "image"`
+  - `source.type = "base64"` 或 `source.type = "url"`
+  - 当目标模型是 GPT / Gemini 时，代理会做跨协议图片转换
+- 多级代理场景下，最稳的图片输入方式仍然建议使用 `data URL/base64`
 
 ### `POST /v1/messages/count_tokens`
 
@@ -703,6 +713,10 @@ x-api-key: <proxyApiKey>
 - 当前只支持 **OpenAI 模型**
 - 支持 `reasoning.effort`
 - 支持模型后缀覆盖 thinking
+- 支持图片输入：
+  - `input[].content[].type = "input_image"`
+  - `image_url` 支持 `data:image/...;base64,...`
+- 如果目标模型不支持视觉能力，携带图片输入会提前返回 `400 invalid_request_error`
 
 ### 未知 `/v1/*`
 

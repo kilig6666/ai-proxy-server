@@ -4,7 +4,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { GoogleGenAI } from "@google/genai";
 import { getConfig } from "../lib/config.js";
 import { fetchCredits, buildCreditsJson } from "../lib/credits.js";
-import { listModelObjects } from "../lib/model-catalog.js";
+import { listModelObjects, requestHasVisionInput, supportsVision } from "../lib/model-catalog.js";
 import { normalizeSamplingParams } from "../lib/sampling.js";
 import {
   buildAnthropicThinkingPayload,
@@ -18,6 +18,12 @@ import {
   stripAllKnownThinkingFields,
   stripThinkingModelSuffix,
 } from "../lib/thinking.js";
+import {
+  convertAnthropicImageBlockToOpenAIContentPart,
+  convertOpenAIImagePartToGeminiPart,
+  summarizeVisionInput,
+  VisionInputError,
+} from "../lib/vision.js";
 
 const router: IRouter = Router();
 
@@ -402,7 +408,8 @@ type GeminiPart =
   | { text: string }
   | { text: string; thought: true; thoughtSignature?: string }
   | { functionCall: { name: string; args: Record<string, unknown> } }
-  | { functionResponse: { name: string; response: Record<string, unknown> } };
+  | { functionResponse: { name: string; response: Record<string, unknown> } }
+  | Record<string, unknown>;
 
 type GeminiContent = { role: string; parts: GeminiPart[] };
 
@@ -426,10 +433,46 @@ function isAnthropicToolDefinition(tool: Anthropic.ToolUnion): tool is Anthropic
   return "input_schema" in tool;
 }
 
-function convertMessagesToGemini(messages: OpenAI.ChatCompletionMessageParam[]): {
+async function convertOpenAIContentToGeminiParts(content: unknown): Promise<GeminiPart[]> {
+  if (typeof content === "string") {
+    return [{ text: content }];
+  }
+
+  if (!Array.isArray(content)) {
+    return [{ text: "" }];
+  }
+
+  const parts: GeminiPart[] = [];
+  for (const rawPart of content) {
+    if (!isPlainObject(rawPart)) {
+      parts.push({ text: JSON.stringify(rawPart) });
+      continue;
+    }
+
+    if (rawPart.type === "text") {
+      parts.push({ text: String(rawPart.text ?? "") });
+      continue;
+    }
+
+    if (rawPart.type === "image_url") {
+      parts.push(await convertOpenAIImagePartToGeminiPart(rawPart));
+      continue;
+    }
+
+    parts.push({ text: JSON.stringify(rawPart) });
+  }
+
+  if (parts.length === 0) {
+    return [{ text: "" }];
+  }
+
+  return parts;
+}
+
+async function convertMessagesToGemini(messages: OpenAI.ChatCompletionMessageParam[]): Promise<{
   systemInstruction?: string;
   contents: GeminiContent[];
-} {
+}> {
   let systemInstruction: string | undefined;
   const contents: GeminiContent[] = [];
 
@@ -470,11 +513,7 @@ function convertMessagesToGemini(messages: OpenAI.ChatCompletionMessageParam[]):
         collectReasoningTexts((msg as unknown as Record<string, unknown>).reasoning_content),
       );
       if (reasoningText) parts.push({ text: reasoningText, thought: true });
-      const text = typeof msg.content === "string" ? msg.content
-        : Array.isArray(msg.content)
-          ? (msg.content as { type: string; text?: string }[]).filter(p => p.type === "text").map(p => p.text ?? "").join("")
-          : "";
-      if (text) parts.push({ text });
+      parts.push(...await convertOpenAIContentToGeminiParts(msg.content));
       if (msg.tool_calls) {
         for (const tc of msg.tool_calls) {
           let args: Record<string, unknown> = {};
@@ -489,17 +528,7 @@ function convertMessagesToGemini(messages: OpenAI.ChatCompletionMessageParam[]):
     }
 
     if (msg.role === "user") {
-      let parts: GeminiPart[] = [];
-      if (typeof msg.content === "string") {
-        parts = [{ text: msg.content }];
-      } else if (Array.isArray(msg.content)) {
-        parts = (msg.content as { type: string; text?: string }[])
-          .filter(p => p.type === "text")
-          .map(p => ({ text: p.text ?? "" }));
-        if (parts.length === 0) parts = [{ text: "" }];
-      } else {
-        parts = [{ text: "" }];
-      }
+      const parts = await convertOpenAIContentToGeminiParts(msg.content);
       const last = contents[contents.length - 1];
       if (last && last.role === "user") {
         last.parts.push(...parts);
@@ -838,17 +867,30 @@ function convertAnthropicRequestToOpenAIPayload(body: Anthropic.MessageCreatePar
         openAIMessages.push({ role: "user", content: msg.content });
       } else {
         const content = msg.content as Anthropic.ContentBlockParam[];
-        const toolResults = content.filter((b) => b.type === "tool_result") as Anthropic.ToolResultBlockParam[];
-        const textBlocks = content.filter((b) => b.type === "text") as Anthropic.TextBlockParam[];
-        for (const tr of toolResults) {
-          openAIMessages.push({
-            role: "tool",
-            tool_call_id: tr.tool_use_id,
-            content: typeof tr.content === "string" ? tr.content : JSON.stringify(tr.content),
-          });
+        const userParts: Array<OpenAI.ChatCompletionContentPartText | OpenAI.ChatCompletionContentPartImage> = [];
+        for (const block of content) {
+          if (block.type === "tool_result") {
+            const toolResult = block as Anthropic.ToolResultBlockParam;
+            openAIMessages.push({
+              role: "tool",
+              tool_call_id: toolResult.tool_use_id,
+              content: typeof toolResult.content === "string" ? toolResult.content : JSON.stringify(toolResult.content),
+            });
+            continue;
+          }
+
+          if (block.type === "text") {
+            userParts.push({ type: "text", text: (block as Anthropic.TextBlockParam).text });
+            continue;
+          }
+
+          if (block.type === "image") {
+            userParts.push(convertAnthropicImageBlockToOpenAIContentPart(block as Anthropic.ImageBlockParam));
+          }
         }
-        if (textBlocks.length > 0) {
-          openAIMessages.push({ role: "user", content: textBlocks.map((b) => b.text).join("") });
+
+        if (userParts.length > 0) {
+          openAIMessages.push({ role: "user", content: userParts });
         }
       }
     } else if (msg.role === "assistant") {
@@ -978,6 +1020,31 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
     : isAnthropicModel(model) ? "anthropic"
     : isGeminiModel(model) ? "gemini"
     : null;
+  const visionSummary = summarizeVisionInput("chat", body);
+  const hasVisionInput = requestHasVisionInput("chat", body);
+
+  if (hasVisionInput) {
+    req.log.info({
+      model,
+      requestedModel,
+      visionInputCount: visionSummary.count,
+      visionInputKinds: visionSummary.kinds,
+      visionTargetProvider: targetProvider ?? "unknown",
+    }, "Vision input detected");
+  }
+
+  if (hasVisionInput && !supportsVision(model)) {
+    req.log.warn({
+      model,
+      requestedModel,
+      visionInputCount: visionSummary.count,
+      visionInputKinds: visionSummary.kinds,
+      visionRejectedForUnsupportedModel: true,
+    }, "Vision input rejected for unsupported model");
+    sendOpenAIInvalidRequest(res, `Model "${requestedModel}" does not support image inputs`);
+    return;
+  }
+
   const thinkingResolution = targetProvider
     ? resolveThinkingRequest({ model: requestedModel, body, route: "chat", targetProvider })
     : null;
@@ -1327,7 +1394,23 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
     }
 
     const gemini = getGeminiClient();
-    const { systemInstruction, contents } = convertMessagesToGemini(rawMessages);
+    let systemInstruction: string | undefined;
+    let contents: GeminiContent[];
+    try {
+      ({ systemInstruction, contents } = await convertMessagesToGemini(rawMessages));
+    } catch (error) {
+      if (error instanceof VisionInputError) {
+        req.log.warn({
+          model,
+          provider: "gemini",
+          visionFetchedRemoteImage: visionSummary.kinds.includes("remote_url"),
+          visionFetchFailureReason: error.message,
+        }, "Gemini vision input rejected");
+        sendOpenAIInvalidRequest(res, error.message);
+        return;
+      }
+      throw error;
+    }
 
     // Fix 7: full generationConfig
     const generationConfig: Record<string, unknown> = { maxOutputTokens: maxTokens ?? 8192 };
@@ -1582,6 +1665,13 @@ router.post("/messages/count_tokens", requireAuth, async (req: Request, res: Res
     return;
   }
 
+  const hasVisionInput = requestHasVisionInput("messages", body as unknown as Record<string, unknown>);
+  if (hasVisionInput && !supportsVision(model)) {
+    req.log.warn({ model, requestedModel, visionRejectedForUnsupportedModel: true, feature: "count_tokens" }, "Vision input rejected for unsupported Anthropic model");
+    sendAnthropicInvalidRequest(res, `Model "${requestedModel}" does not support image inputs`);
+    return;
+  }
+
   const thinkingResolution = resolveThinkingRequest({
     model: requestedModel,
     body: body as unknown as Record<string, unknown>,
@@ -1669,6 +1759,28 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
     : isOpenAIModel(model) ? "openai"
     : isGeminiModel(model) ? "gemini"
     : null;
+  const visionSummary = summarizeVisionInput("messages", body as unknown as Record<string, unknown>);
+  const hasVisionInput = requestHasVisionInput("messages", body as unknown as Record<string, unknown>);
+  if (hasVisionInput) {
+    req.log.info({
+      model,
+      requestedModel,
+      visionInputCount: visionSummary.count,
+      visionInputKinds: visionSummary.kinds,
+      visionTargetProvider: targetProvider ?? "unknown",
+    }, "Vision input detected");
+  }
+  if (hasVisionInput && !supportsVision(model)) {
+    req.log.warn({
+      model,
+      requestedModel,
+      visionInputCount: visionSummary.count,
+      visionInputKinds: visionSummary.kinds,
+      visionRejectedForUnsupportedModel: true,
+    }, "Vision input rejected for unsupported model");
+    sendAnthropicInvalidRequest(res, `Model "${requestedModel}" does not support image inputs`);
+    return;
+  }
   const thinkingResolution = targetProvider
     ? resolveThinkingRequest({ model: requestedModel, body: body as unknown as Record<string, unknown>, route: "messages", targetProvider })
     : null;
@@ -1780,7 +1892,7 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
       converted = convertAnthropicRequestToOpenAIPayload(body);
     } catch (err) {
       req.log.warn({ err, model, provider: "openai" }, "Invalid /messages payload for OpenAI conversion");
-      sendAnthropicInvalidRequest(res, "messages payload is not compatible with Anthropic/OpenAI conversion");
+      sendAnthropicInvalidRequest(res, err instanceof VisionInputError ? err.message : "messages payload is not compatible with Anthropic/OpenAI conversion");
       return;
     }
 
@@ -1980,10 +2092,26 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
       converted = convertAnthropicRequestToOpenAIPayload(body);
     } catch (err) {
       req.log.warn({ err, model, provider: "gemini" }, "Invalid /messages payload for Gemini conversion");
-      sendAnthropicInvalidRequest(res, "messages payload is not compatible with Anthropic/Gemini conversion");
+      sendAnthropicInvalidRequest(res, err instanceof VisionInputError ? err.message : "messages payload is not compatible with Anthropic/Gemini conversion");
       return;
     }
-    const { systemInstruction, contents } = convertMessagesToGemini(converted.messages);
+    let systemInstruction: string | undefined;
+    let contents: GeminiContent[];
+    try {
+      ({ systemInstruction, contents } = await convertMessagesToGemini(converted.messages));
+    } catch (err) {
+      if (err instanceof VisionInputError) {
+        req.log.warn({
+          model,
+          provider: "gemini",
+          visionFetchedRemoteImage: visionSummary.kinds.includes("remote_url"),
+          visionFetchFailureReason: err.message,
+        }, "Gemini vision input rejected");
+        sendAnthropicInvalidRequest(res, err.message);
+        return;
+      }
+      throw err;
+    }
 
     const generationConfig: Record<string, unknown> = { maxOutputTokens: body.max_tokens ?? 8192 };
     if (sampling.temperature !== undefined) generationConfig.temperature = sampling.temperature;
@@ -2193,6 +2321,29 @@ router.post("/responses", requireAuth, async (req: Request, res: Response) => {
         type: "invalid_request_error",
       },
     });
+    return;
+  }
+
+  const visionSummary = summarizeVisionInput("responses", body);
+  const hasVisionInput = requestHasVisionInput("responses", body);
+  if (hasVisionInput) {
+    req.log.info({
+      model,
+      requestedModel,
+      visionInputCount: visionSummary.count,
+      visionInputKinds: visionSummary.kinds,
+      visionTargetProvider: "openai",
+    }, "Vision input detected");
+  }
+  if (hasVisionInput && !supportsVision(model)) {
+    req.log.warn({
+      model,
+      requestedModel,
+      visionInputCount: visionSummary.count,
+      visionInputKinds: visionSummary.kinds,
+      visionRejectedForUnsupportedModel: true,
+    }, "Vision input rejected for unsupported model");
+    sendOpenAIInvalidRequest(res, `Model "${requestedModel}" does not support image inputs`);
     return;
   }
 
