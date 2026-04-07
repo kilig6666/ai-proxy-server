@@ -1,6 +1,6 @@
 # AI Proxy Server
 
-> **by kilig** — v2.5
+> **by kilig** — v2.6
 
 一个支持 OpenAI / Anthropic / Gemini 三家供应商的统一反向代理服务，对外暴露标准 OpenAI 兼容接口（`/v1`），并附带一个深色/浅色主题、中英双语的 React 管理门户。
 
@@ -120,6 +120,7 @@ workspace/
 | **统一接口** | 所有供应商共用 OpenAI 兼容的 `/v1/chat/completions` |
 | **流式输出** | SSE 流式传输，实时返回 token |
 | **Tool Calls** | 函数调用 / 工具调用全平台透传 |
+| **Thinking 适配** | 支持 `reasoning_effort` / `reasoning.effort` / Claude `thinking.*` / Gemini `generationConfig.thinkingConfig`，并支持模型后缀覆盖 |
 | **模型路由** | 根据模型名前缀自动路由至对应供应商 SDK |
 | **频率限制** | 每个 Bearer Key 限制 120 请求/分钟（内存滑动窗口） |
 | **自动重试** | 429 / 5xx / 网络错误触发指数退避重试（最多 3 次）|
@@ -182,6 +183,18 @@ workspace/
 - `claude-*` → Anthropic SDK
 - `gemini-*` → Google GenAI SDK
 
+### Thinking / Reasoning 支持
+
+- 支持的输入方式：
+  - Chat：`reasoning_effort`
+  - Messages：`thinking.*`、`output_config.effort`
+  - Responses：`reasoning.effort`
+  - 兼容读取：`generationConfig.thinkingConfig`
+- 支持模型后缀覆盖：`model(none|auto|minimal|low|medium|high|xhigh|max|8192)`
+- 优先级：**模型后缀 > 请求体 > 默认**
+- 不支持 Thinking 的模型会**自动剥离**相关字段并继续请求，不直接报错
+- `/v1/chat/completions`、`/v1/messages`、`/v1/responses` 都会先去掉模型后缀，再把 Thinking 映射到目标 provider
+
 ---
 
 ## API 接口文档
@@ -217,6 +230,12 @@ Authorization: Bearer <proxyApiKey>
 #### `POST /v1/chat/completions`
 
 统一对话接口，兼容 OpenAI Chat Completions 格式，自动路由至三家供应商。
+
+**Thinking 字段：**
+- 入参：`reasoning_effort`
+- 目标 OpenAI：映射到 `reasoning_effort`
+- 目标 Claude：映射到 `thinking` / `output_config.effort`
+- 目标 Gemini：映射到 `generationConfig.thinkingConfig`
 
 **请求体：**
 ```json
@@ -291,7 +310,12 @@ for await (const chunk of stream) {
 
 #### `POST /v1/messages`
 
-Anthropic 原生 Messages API 格式入口，支持 OpenAI 模型透传（内部自动转换格式）。
+Anthropic 原生 Messages API 格式入口，支持 Claude / OpenAI / Gemini 模型透传（内部自动转换格式）。
+
+**Thinking 字段：**
+- 原生支持 Claude `thinking.*` 与 `output_config.effort`
+- 若目标是 OpenAI / Codex，会自动转成 `reasoning_effort`
+- 若目标是 Gemini，会自动转成 `generationConfig.thinkingConfig`
 
 ```bash
 curl https://your-server/v1/messages \
@@ -306,9 +330,38 @@ curl https://your-server/v1/messages \
 
 ---
 
+#### `POST /v1/messages/count_tokens`
+
+Anthropic 原生 token counting 接口。
+
+- 当前仅支持 Anthropic 模型
+- 若 `messages` 不是数组，会返回 `400 invalid_request_error`
+
+```bash
+curl https://your-server/v1/messages/count_tokens \
+  -H "Authorization: Bearer admin123" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-sonnet-4-6",
+    "messages": [{"role": "user", "content": "Hello"}]
+  }'
+```
+
+---
+
 #### `POST /v1/responses`
 
 OpenAI Responses API 透传，**仅支持 OpenAI 模型**（`gpt-*` / `o*`）。
+
+**Thinking 字段：**
+- 支持 `reasoning.effort`
+- 支持模型后缀覆盖，例如 `gpt-5.4(high)`、`gpt-5.3-codex(8192)`
+
+---
+
+#### 未知 `/v1/*` 路径
+
+未知的 `/v1/*` 路径会统一返回 **JSON 404**，避免默认 HTML 404 被外层客户端误判成 500。
 
 ---
 
@@ -512,7 +565,7 @@ pnpm --filter @workspace/api-portal run build
 
 | 版本 | 内容 |
 |------|------|
-| v2.5 | 默认明亮主题；隐藏余额卡片；多账号部署文档完善 |
+| v2.6 | 默认明亮主题；隐藏余额卡片；多账号部署文档完善 |
 | v2.4 | Anthropic 原生协议 x-api-key 认证支持；/v1/v1 路径兼容；默认凭据更新为 admin999 |
 | v2.3 | 修复 401 自动恢复；中英双语；左侧导航栏；模型列表 Tab；28 个模型全量同步 |
 | v2.2 | 添加频率限制 (120 RPM)；Admin Token 机制；配置持久化 |

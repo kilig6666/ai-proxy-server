@@ -202,14 +202,14 @@ type ModelMeta = { id: string; note?: string; ctx: string; caps: Cap[]; route: s
 
 const OPENAI_MODELS: ModelMeta[] = [
   // ── GPT-5.x series ──
-  { id: "gpt-5.4",        note: "Latest",       ctx: "1M",   caps: ["stream","tools","vision","json"], route: "/v1/chat/completions" },
-  { id: "gpt-5.3-codex",  note: "Code",         ctx: "1M",   caps: ["stream","tools","json"],          route: "/v1/chat/completions · /v1/responses" },
-  { id: "gpt-5.2",                               ctx: "1M",   caps: ["stream","tools","vision","json"], route: "/v1/chat/completions" },
-  { id: "gpt-5.2-codex",  note: "Code",         ctx: "1M",   caps: ["stream","tools","json"],          route: "/v1/chat/completions · /v1/responses" },
-  { id: "gpt-5.1",                               ctx: "1M",   caps: ["stream","tools","vision","json"], route: "/v1/chat/completions" },
-  { id: "gpt-5",          note: "Most capable", ctx: "1M",   caps: ["stream","tools","vision","json"], route: "/v1/chat/completions" },
-  { id: "gpt-5-mini",                            ctx: "1M",   caps: ["stream","tools","vision","json"], route: "/v1/chat/completions" },
-  { id: "gpt-5-nano",     note: "Fastest",      ctx: "1M",   caps: ["stream","tools","json"],          route: "/v1/chat/completions" },
+  { id: "gpt-5.4",        note: "Latest",       ctx: "1M",   caps: ["stream","tools","vision","json","reasoning"], route: "/v1/chat/completions · /v1/responses" },
+  { id: "gpt-5.3-codex",  note: "Code",         ctx: "1M",   caps: ["stream","tools","json","reasoning"],          route: "/v1/chat/completions · /v1/responses" },
+  { id: "gpt-5.2",                               ctx: "1M",   caps: ["stream","tools","vision","json","reasoning"], route: "/v1/chat/completions · /v1/responses" },
+  { id: "gpt-5.2-codex",  note: "Code",         ctx: "1M",   caps: ["stream","tools","json","reasoning"],          route: "/v1/chat/completions · /v1/responses" },
+  { id: "gpt-5.1",                               ctx: "1M",   caps: ["stream","tools","vision","json","reasoning"], route: "/v1/chat/completions · /v1/responses" },
+  { id: "gpt-5",          note: "Most capable", ctx: "1M",   caps: ["stream","tools","vision","json","reasoning"], route: "/v1/chat/completions · /v1/responses" },
+  { id: "gpt-5-mini",                            ctx: "1M",   caps: ["stream","tools","vision","json","reasoning"], route: "/v1/chat/completions · /v1/responses" },
+  { id: "gpt-5-nano",     note: "Fastest",      ctx: "1M",   caps: ["stream","tools","json","reasoning"],          route: "/v1/chat/completions · /v1/responses" },
   // ── GPT-4.x series ──
   { id: "gpt-4.1",        note: "Recommended",  ctx: "1M",   caps: ["stream","tools","vision","json"], route: "/v1/chat/completions" },
   { id: "gpt-4.1-mini",                          ctx: "1M",   caps: ["stream","tools","vision","json"], route: "/v1/chat/completions" },
@@ -222,19 +222,19 @@ const OPENAI_MODELS: ModelMeta[] = [
   { id: "o3-mini",        note: "Reasoning",    ctx: "200K", caps: ["stream","reasoning"],             route: "/v1/chat/completions" },
 ];
 const ANTHROPIC_MODELS: ModelMeta[] = [
-  { id: "claude-opus-4-6",   note: "Most capable", ctx: "200K", caps: ["stream","tools","vision","json"], route: "/v1/chat/completions · /v1/messages" },
-  { id: "claude-opus-4-5",                          ctx: "200K", caps: ["stream","tools","vision","json"], route: "/v1/chat/completions · /v1/messages" },
-  { id: "claude-opus-4-1",                          ctx: "200K", caps: ["stream","tools","vision","json"], route: "/v1/chat/completions · /v1/messages" },
-  { id: "claude-sonnet-4-6", note: "Recommended",  ctx: "200K", caps: ["stream","tools","vision","json"], route: "/v1/chat/completions · /v1/messages" },
-  { id: "claude-sonnet-4-5",                        ctx: "200K", caps: ["stream","tools","vision","json"], route: "/v1/chat/completions · /v1/messages" },
+  { id: "claude-opus-4-6",   note: "Most capable", ctx: "200K", caps: ["stream","tools","vision","json","reasoning"], route: "/v1/chat/completions · /v1/messages" },
+  { id: "claude-opus-4-5",                          ctx: "200K", caps: ["stream","tools","vision","json","reasoning"], route: "/v1/chat/completions · /v1/messages" },
+  { id: "claude-opus-4-1",                          ctx: "200K", caps: ["stream","tools","vision","json","reasoning"], route: "/v1/chat/completions · /v1/messages" },
+  { id: "claude-sonnet-4-6", note: "Recommended",  ctx: "200K", caps: ["stream","tools","vision","json","reasoning"], route: "/v1/chat/completions · /v1/messages" },
+  { id: "claude-sonnet-4-5",                        ctx: "200K", caps: ["stream","tools","vision","json","reasoning"], route: "/v1/chat/completions · /v1/messages" },
   { id: "claude-haiku-4-5",  note: "Fastest",      ctx: "200K", caps: ["stream","tools","json"],          route: "/v1/chat/completions · /v1/messages" },
 ];
 const GEMINI_MODELS: ModelMeta[] = [
-  { id: "gemini-3.1-pro-preview",                       ctx: "2M",  caps: ["stream","tools","vision"],        route: "/v1/chat/completions" },
-  { id: "gemini-3-pro-preview",                         ctx: "2M",  caps: ["stream","tools","vision"],        route: "/v1/chat/completions" },
-  { id: "gemini-3-flash-preview",                       ctx: "1M",  caps: ["stream","tools","vision"],        route: "/v1/chat/completions" },
-  { id: "gemini-2.5-pro",   note: "Most capable",      ctx: "2M",  caps: ["stream","tools","vision","json"], route: "/v1/chat/completions" },
-  { id: "gemini-2.5-flash", note: "Recommended",       ctx: "1M",  caps: ["stream","tools","vision","json"], route: "/v1/chat/completions" },
+  { id: "gemini-3.1-pro-preview",                       ctx: "2M",  caps: ["stream","tools","vision","reasoning"],        route: "/v1/chat/completions · /v1/messages" },
+  { id: "gemini-3-pro-preview",                         ctx: "2M",  caps: ["stream","tools","vision","reasoning"],        route: "/v1/chat/completions · /v1/messages" },
+  { id: "gemini-3-flash-preview",                       ctx: "1M",  caps: ["stream","tools","vision","reasoning"],        route: "/v1/chat/completions · /v1/messages" },
+  { id: "gemini-2.5-pro",   note: "Most capable",      ctx: "2M",  caps: ["stream","tools","vision","json","reasoning"], route: "/v1/chat/completions · /v1/messages" },
+  { id: "gemini-2.5-flash", note: "Recommended",       ctx: "1M",  caps: ["stream","tools","vision","json","reasoning"], route: "/v1/chat/completions · /v1/messages" },
 ];
 const ALL_MODELS = [
   ...OPENAI_MODELS.map((m) => ({ ...m, provider: "OpenAI" as const })),
@@ -245,8 +245,8 @@ const ENDPOINTS = [
   { method: "GET", path: "/v1/models", label: "List Models", type: "Both", desc: "Returns all available model IDs across OpenAI, Anthropic and Gemini" },
   { method: "GET", path: "/v1/credits", label: "Credits Balance", type: "Both", desc: "Query OpenAI account credits balance and this month's usage. Auth with proxyApiKey Bearer token." },
   { method: "POST", path: "/v1/chat/completions", label: "Chat Completions", type: "OpenAI", desc: "OpenAI-compatible chat API. Supports streaming, tool calls, and all models via prefix routing" },
-  { method: "POST", path: "/v1/responses", label: "Responses API", type: "Responses", desc: "OpenAI Responses API pass-through. Supports gpt-5.4, gpt-5.3-codex, gpt-5.2-codex and all OpenAI models. Streaming supported." },
-  { method: "POST", path: "/v1/messages", label: "Messages", type: "Anthropic", desc: "Anthropic native Messages API. Supports streaming, tool use, and both Claude & GPT models" },
+  { method: "POST", path: "/v1/responses", label: "Responses API", type: "Responses", desc: "OpenAI Responses API pass-through with suffix reasoning override and reasoning.effort normalization. Streaming supported." },
+  { method: "POST", path: "/v1/messages", label: "Messages", type: "Anthropic", desc: "Anthropic native Messages API. Supports streaming, tool use, and Claude / GPT / Gemini model routing with Thinking adaptation" },
 ];
 
 type ChatMessage = { role: "user" | "assistant"; content: string };
@@ -858,7 +858,7 @@ export default function App() {
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <div style={{ fontSize: 11, fontWeight: 700, color: C.gradientB, background: C.purpleDark, border: `1px solid ${C.purple}`, borderRadius: 6, padding: "2px 7px", letterSpacing: "0.06em", fontFamily: "monospace" }}>v2.5</div>
+          <div style={{ fontSize: 11, fontWeight: 700, color: C.gradientB, background: C.purpleDark, border: `1px solid ${C.purple}`, borderRadius: 6, padding: "2px 7px", letterSpacing: "0.06em", fontFamily: "monospace" }}>v2.6</div>
           <StatusDot online={online} C={C} t={t} />
           <LangToggle lang={lang} setLang={handleSetLang} C={C} />
           <button onClick={() => setDark((d) => !d)} style={{ background: C.bgInput, border: `1px solid ${C.border}`, borderRadius: 8, padding: "5px 10px", fontSize: 17, cursor: "pointer", color: C.text, lineHeight: 1 }}>{dark ? "☀️" : "🌙"}</button>

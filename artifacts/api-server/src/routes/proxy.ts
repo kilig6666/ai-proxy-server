@@ -4,7 +4,20 @@ import Anthropic from "@anthropic-ai/sdk";
 import { GoogleGenAI } from "@google/genai";
 import { getConfig } from "../lib/config.js";
 import { fetchCredits, buildCreditsJson } from "../lib/credits.js";
+import { listModelObjects } from "../lib/model-catalog.js";
 import { normalizeSamplingParams } from "../lib/sampling.js";
+import {
+  buildAnthropicThinkingPayload,
+  buildGeminiThinkingConfig,
+  buildOpenAIReasoningEffort,
+  buildResponsesReasoning,
+  buildThinkingLogMeta,
+  collectReasoningTexts,
+  joinReasoningTexts,
+  resolveThinkingRequest,
+  stripAllKnownThinkingFields,
+  stripThinkingModelSuffix,
+} from "../lib/thinking.js";
 
 const router: IRouter = Router();
 
@@ -125,16 +138,55 @@ function requireAuth(req: Request, res: Response, next: () => void) {
   next();
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function sendAnthropicInvalidRequest(res: Response, message: string, status = 400) {
+  res.status(status).json({ type: "error", error: { type: "invalid_request_error", message } });
+}
+
+function sendOpenAIInvalidRequest(res: Response, message: string, status = 400) {
+  res.status(status).json({ error: { message, type: "invalid_request_error", code: status } });
+}
+
+function isValidAnthropicContentBlock(block: unknown): boolean {
+  return isPlainObject(block) && typeof block.type === "string";
+}
+
+function isValidAnthropicMessageParam(message: unknown): message is Anthropic.MessageParam {
+  if (!isPlainObject(message)) return false;
+  if (message.role !== "user" && message.role !== "assistant") return false;
+  if (typeof message.content === "string") return true;
+  return Array.isArray(message.content) && message.content.every((item) => isValidAnthropicContentBlock(item));
+}
+
+function validateAnthropicMessagesInput(body: { model?: unknown; messages?: unknown }): string | undefined {
+  if (!body.model || typeof body.model !== "string") {
+    return "model is required";
+  }
+  if (!Array.isArray(body.messages)) {
+    return "messages must be an array";
+  }
+  for (let index = 0; index < body.messages.length; index++) {
+    if (!isValidAnthropicMessageParam(body.messages[index])) {
+      return `messages[${index}] must be an object with role and content`;
+    }
+  }
+  return undefined;
+}
+
 function isOpenAIModel(model: string): boolean {
-  return model.startsWith("gpt-") || model.startsWith("o");
+  const baseModel = stripThinkingModelSuffix(model);
+  return baseModel.startsWith("gpt-") || baseModel.startsWith("o");
 }
 
 function isAnthropicModel(model: string): boolean {
-  return model.startsWith("claude-");
+  return stripThinkingModelSuffix(model).startsWith("claude-");
 }
 
 function isGeminiModel(model: string): boolean {
-  return model.startsWith("gemini-");
+  return stripThinkingModelSuffix(model).startsWith("gemini-");
 }
 
 // ─── Fix 6: Gemini finish_reason mapping ──────────────────────────────────────
@@ -155,6 +207,7 @@ function mapGeminiFinishReason(reason: string | undefined): OpenAI.ChatCompletio
 
 type GeminiPart =
   | { text: string }
+  | { text: string; thought: true; thoughtSignature?: string }
   | { functionCall: { name: string; args: Record<string, unknown> } }
   | { functionResponse: { name: string; response: Record<string, unknown> } };
 
@@ -165,6 +218,7 @@ type OpenAIFunctionToolCall = OpenAI.ChatCompletionMessageFunctionToolCall;
 
 type AnthropicClientResponseBlock =
   | Anthropic.TextBlockParam
+  | Anthropic.ThinkingBlockParam
   | Anthropic.ToolUseBlockParam;
 
 function isOpenAIFunctionTool(tool: OpenAI.ChatCompletionTool): tool is OpenAIFunctionTool {
@@ -219,6 +273,10 @@ function convertMessagesToGemini(messages: OpenAI.ChatCompletionMessageParam[]):
 
     if (msg.role === "assistant") {
       const parts: GeminiPart[] = [];
+      const reasoningText = joinReasoningTexts(
+        collectReasoningTexts((msg as unknown as Record<string, unknown>).reasoning_content),
+      );
+      if (reasoningText) parts.push({ text: reasoningText, thought: true });
       const text = typeof msg.content === "string" ? msg.content
         : Array.isArray(msg.content)
           ? (msg.content as { type: string; text?: string }[]).filter(p => p.type === "text").map(p => p.text ?? "").join("")
@@ -341,8 +399,14 @@ function convertMessagesToAnthropic(
     }
 
     if (msg.role === "assistant") {
+      const reasoningText = joinReasoningTexts(
+        collectReasoningTexts((msg as unknown as Record<string, unknown>).reasoning_content),
+      );
+      const thinkingBlocks = reasoningText
+        ? [{ type: "thinking" as const, thinking: reasoningText, signature: "" }]
+        : [];
       if (msg.tool_calls && msg.tool_calls.length > 0) {
-        const content: Anthropic.ContentBlockParam[] = [];
+        const content: Anthropic.ContentBlockParam[] = [...thinkingBlocks];
         if (msg.content) {
           content.push({ type: "text", text: typeof msg.content === "string" ? msg.content : "" });
         }
@@ -354,6 +418,13 @@ function convertMessagesToAnthropic(
         }
         converted.push({ role: "assistant", content });
       } else {
+        if (thinkingBlocks.length > 0) {
+          const content: Anthropic.ContentBlockParam[] = [...thinkingBlocks];
+          const textContent = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content ?? "");
+          if (textContent) content.push({ type: "text", text: textContent });
+          converted.push({ role: "assistant", content });
+          continue;
+        }
         converted.push({
           role: "assistant",
           content: typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content ?? ""),
@@ -467,9 +538,11 @@ function sanitizeAnthropicPayload(parts: AnthropicPayloadParts): AnthropicPayloa
 function convertAnthropicToOpenAI(anthropicMsg: Anthropic.Message, model: string): OpenAI.ChatCompletion {
   const toolCalls: OpenAI.ChatCompletionMessageToolCall[] = [];
   let textContent = "";
+  const reasoningTexts: string[] = [];
 
   for (const block of anthropicMsg.content) {
     if (block.type === "text") textContent += block.text;
+    else if (block.type === "thinking") reasoningTexts.push(block.thinking);
     else if (block.type === "tool_use") {
       toolCalls.push({
         id: block.id,
@@ -491,6 +564,10 @@ function convertAnthropicToOpenAI(anthropicMsg: Anthropic.Message, model: string
     refusal: null,
   };
   if (toolCalls.length > 0) message.tool_calls = toolCalls;
+  const joinedReasoning = joinReasoningTexts(reasoningTexts);
+  if (joinedReasoning) {
+    (message as unknown as Record<string, unknown>).reasoning_content = joinedReasoning;
+  }
 
   return {
     id: anthropicMsg.id,
@@ -509,6 +586,123 @@ function convertAnthropicToOpenAI(anthropicMsg: Anthropic.Message, model: string
       total_tokens: anthropicMsg.usage.input_tokens + anthropicMsg.usage.output_tokens,
     },
   };
+}
+
+function buildUsage(
+  promptTokens: number,
+  completionTokens: number,
+  reasoningTokens?: number,
+): OpenAI.CompletionUsage {
+  const usage: OpenAI.CompletionUsage = {
+    prompt_tokens: promptTokens,
+    completion_tokens: completionTokens,
+    total_tokens: promptTokens + completionTokens,
+  };
+  if (reasoningTokens && reasoningTokens > 0) {
+    (usage as unknown as Record<string, unknown>).completion_tokens_details = {
+      reasoning_tokens: reasoningTokens,
+    };
+  }
+  return usage;
+}
+
+function attachReasoningContent<T extends Record<string, unknown>>(target: T, texts: string[]): T {
+  const reasoningContent = joinReasoningTexts(texts);
+  if (reasoningContent) {
+    (target as Record<string, unknown>).reasoning_content = reasoningContent;
+  }
+  return target;
+}
+
+function logThinkingDecision(req: Request, resolution: ReturnType<typeof resolveThinkingRequest>, extra: Record<string, unknown> = {}) {
+  if (!resolution.hadRequestConfig) return;
+  req.log.info(
+    {
+      requestedModel: resolution.requestedModel,
+      model: resolution.model,
+      ...buildThinkingLogMeta(resolution),
+      ...extra,
+    },
+    resolution.stripped ? "Thinking config stripped" : "Thinking config resolved",
+  );
+}
+
+function convertAnthropicRequestToOpenAIPayload(body: Anthropic.MessageCreateParams): {
+  messages: OpenAI.ChatCompletionMessageParam[];
+  tools?: OpenAI.ChatCompletionTool[];
+  toolChoice?: OpenAI.ChatCompletionCreateParams["tool_choice"];
+} {
+  const openAIMessages: OpenAI.ChatCompletionMessageParam[] = [];
+  if (body.system) {
+    const sysText = typeof body.system === "string" ? body.system
+      : (body.system as Anthropic.TextBlockParam[]).map((b) => b.text).join("");
+    openAIMessages.push({ role: "system", content: sysText });
+  }
+
+  for (const msg of body.messages) {
+    if (msg.role === "user") {
+      if (typeof msg.content === "string") {
+        openAIMessages.push({ role: "user", content: msg.content });
+      } else {
+        const content = msg.content as Anthropic.ContentBlockParam[];
+        const toolResults = content.filter((b) => b.type === "tool_result") as Anthropic.ToolResultBlockParam[];
+        const textBlocks = content.filter((b) => b.type === "text") as Anthropic.TextBlockParam[];
+        for (const tr of toolResults) {
+          openAIMessages.push({
+            role: "tool",
+            tool_call_id: tr.tool_use_id,
+            content: typeof tr.content === "string" ? tr.content : JSON.stringify(tr.content),
+          });
+        }
+        if (textBlocks.length > 0) {
+          openAIMessages.push({ role: "user", content: textBlocks.map((b) => b.text).join("") });
+        }
+      }
+    } else if (msg.role === "assistant") {
+      const blocks = Array.isArray(msg.content) ? (msg.content as Anthropic.ContentBlock[]) : [];
+      const toolUseBlocks = blocks.filter((b) => b.type === "tool_use") as Anthropic.ToolUseBlock[];
+      const textBlocks = blocks.filter((b) => b.type === "text") as Anthropic.TextBlock[];
+      const thinkingBlocks = blocks.filter((b) => b.type === "thinking") as Anthropic.ThinkingBlock[];
+      const textContent = typeof msg.content === "string" ? msg.content : textBlocks.map((b) => b.text).join("");
+      const assistantMsg: OpenAI.ChatCompletionAssistantMessageParam = {
+        role: "assistant",
+        content: textContent || null,
+      };
+      if (toolUseBlocks.length > 0) {
+        assistantMsg.tool_calls = toolUseBlocks.map((b) => ({
+          id: b.id,
+          type: "function" as const,
+          function: { name: b.name, arguments: JSON.stringify(b.input) },
+        }));
+      }
+      const reasoningText = joinReasoningTexts(thinkingBlocks.map((block) => block.thinking));
+      if (reasoningText) {
+        (assistantMsg as unknown as Record<string, unknown>).reasoning_content = reasoningText;
+      }
+      openAIMessages.push(assistantMsg);
+    }
+  }
+
+  const tools: OpenAI.ChatCompletionTool[] | undefined = body.tools
+    ?.filter(isAnthropicToolDefinition)
+    .map((t) => ({
+      type: "function" as const,
+      function: {
+        name: t.name,
+        description: t.description,
+        parameters: t.input_schema,
+      },
+    }));
+
+  let toolChoice: OpenAI.ChatCompletionCreateParams["tool_choice"] | undefined;
+  if (body.tool_choice) {
+    const tc = body.tool_choice;
+    if (tc.type === "auto") toolChoice = "auto";
+    else if (tc.type === "any") toolChoice = "required";
+    else if (tc.type === "tool") toolChoice = { type: "function", function: { name: (tc as Anthropic.ToolChoiceTool).name } };
+  }
+
+  return { messages: openAIMessages, tools, toolChoice };
 }
 
 /** Write an SSE error event when headers are already flushed */
@@ -541,41 +735,7 @@ function setupSseHeaders(req: Request, res: Response, keepaliveFn: () => void): 
 // ─── GET /v1/models ───────────────────────────────────────────────────────────
 
 router.get("/models", requireAuth, (_req: Request, res: Response) => {
-  const now = Math.floor(Date.now() / 1000);
-  const models = [
-    // OpenAI — chat/completions
-    { id: "gpt-5.4", object: "model", created: now, owned_by: "openai" },
-    { id: "gpt-5.2", object: "model", created: now, owned_by: "openai" },
-    { id: "gpt-5.1", object: "model", created: now, owned_by: "openai" },
-    { id: "gpt-5", object: "model", created: now, owned_by: "openai" },
-    { id: "gpt-5-mini", object: "model", created: now, owned_by: "openai" },
-    { id: "gpt-5-nano", object: "model", created: now, owned_by: "openai" },
-    { id: "o4-mini", object: "model", created: now, owned_by: "openai" },
-    { id: "o3", object: "model", created: now, owned_by: "openai" },
-    { id: "o3-mini", object: "model", created: now, owned_by: "openai" },
-    { id: "gpt-4.1", object: "model", created: now, owned_by: "openai" },
-    { id: "gpt-4.1-mini", object: "model", created: now, owned_by: "openai" },
-    { id: "gpt-4.1-nano", object: "model", created: now, owned_by: "openai" },
-    { id: "gpt-4o", object: "model", created: now, owned_by: "openai" },
-    { id: "gpt-4o-mini", object: "model", created: now, owned_by: "openai" },
-    // OpenAI — Responses API only
-    { id: "gpt-5.3-codex", object: "model", created: now, owned_by: "openai" },
-    { id: "gpt-5.2-codex", object: "model", created: now, owned_by: "openai" },
-    // Anthropic
-    { id: "claude-opus-4-6", object: "model", created: now, owned_by: "anthropic" },
-    { id: "claude-opus-4-5", object: "model", created: now, owned_by: "anthropic" },
-    { id: "claude-opus-4-1", object: "model", created: now, owned_by: "anthropic" },
-    { id: "claude-sonnet-4-6", object: "model", created: now, owned_by: "anthropic" },
-    { id: "claude-sonnet-4-5", object: "model", created: now, owned_by: "anthropic" },
-    { id: "claude-haiku-4-5", object: "model", created: now, owned_by: "anthropic" },
-    // Gemini
-    { id: "gemini-3.1-pro-preview", object: "model", created: now, owned_by: "google" },
-    { id: "gemini-3-pro-preview", object: "model", created: now, owned_by: "google" },
-    { id: "gemini-3-flash-preview", object: "model", created: now, owned_by: "google" },
-    { id: "gemini-2.5-pro", object: "model", created: now, owned_by: "google" },
-    { id: "gemini-2.5-flash", object: "model", created: now, owned_by: "google" },
-  ];
-  res.json({ object: "list", data: models });
+  res.json({ object: "list", data: listModelObjects() });
 });
 
 // ─── GET /v1/credits ──────────────────────────────────────────────────────────
@@ -597,7 +757,7 @@ router.get("/credits", requireAuth, async (_req: Request, res: Response) => {
 
 router.post("/chat/completions", requireAuth, async (req: Request, res: Response) => {
   const body = req.body as Record<string, unknown>;
-  const model = body.model as string;
+  const requestedModel = body.model as string;
   const stream = Boolean(body.stream);
   const rawMessages = (body.messages ?? []) as OpenAI.ChatCompletionMessageParam[];
   const tools = body.tools as OpenAI.ChatCompletionTool[] | undefined;
@@ -615,9 +775,22 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
   const streamOpts = body.stream_options as { include_usage?: boolean } | undefined;
   const includeUsageInStream = Boolean(streamOpts?.include_usage);
 
-  if (!model) {
+  if (!requestedModel) {
     res.status(400).json({ error: { message: "model is required", type: "invalid_request_error" } });
     return;
+  }
+
+  const model = stripThinkingModelSuffix(requestedModel);
+  const targetProvider = isOpenAIModel(model) ? "openai"
+    : isAnthropicModel(model) ? "anthropic"
+    : isGeminiModel(model) ? "gemini"
+    : null;
+  const thinkingResolution = targetProvider
+    ? resolveThinkingRequest({ model: requestedModel, body, route: "chat", targetProvider })
+    : null;
+
+  if (thinkingResolution) {
+    logThinkingDecision(req, thinkingResolution);
   }
 
   // ── OpenAI ──────────────────────────────────────────────────────────────────
@@ -638,6 +811,8 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
     if (stop != null) openAIParams.stop = stop as string | string[];
     if (sampling.presencePenalty !== undefined) openAIParams.presence_penalty = sampling.presencePenalty;
     if (sampling.frequencyPenalty !== undefined) openAIParams.frequency_penalty = sampling.frequencyPenalty;
+    const reasoningEffort = thinkingResolution ? buildOpenAIReasoningEffort(thinkingResolution) : undefined;
+    if (reasoningEffort !== undefined) openAIParams.reasoning_effort = reasoningEffort;
     // Fix 9: pass stream_options through to OpenAI natively
     if (stream && streamOpts) (openAIParams as unknown as Record<string, unknown>).stream_options = streamOpts;
 
@@ -718,6 +893,16 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
       req.log.info({ model, provider: "anthropic", removedPaths: sanitizedAnthropic.removedPaths }, "Sanitized unsupported Anthropic payload fields");
     }
 
+    const anthropicThinking = thinkingResolution
+        ? buildAnthropicThinkingPayload({
+          resolution: thinkingResolution,
+          maxTokens: maxTokens ?? 8192,
+          existingOutputConfig: isPlainObject(body.output_config)
+            ? (body.output_config as Anthropic.MessageCreateParamsNonStreaming["output_config"])
+            : undefined,
+        })
+      : {};
+
     const anthropicParams: Anthropic.MessageCreateParamsNonStreaming = {
       model,
       max_tokens: maxTokens ?? 8192,
@@ -727,6 +912,8 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
     if (sanitizedAnthropic.tools) anthropicParams.tools = sanitizedAnthropic.tools;
     if (effectiveToolChoice) anthropicParams.tool_choice = convertToolChoiceToAnthropic(effectiveToolChoice);
     if (sampling.temperature !== undefined) anthropicParams.temperature = sampling.temperature;
+    if (anthropicThinking.thinking) anthropicParams.thinking = anthropicThinking.thinking;
+    if (anthropicThinking.outputConfig) anthropicParams.output_config = anthropicThinking.outputConfig;
     // Fix 7: forward top_p and stop sequences where Anthropic supports them
     if (sampling.topP !== undefined) (anthropicParams as unknown as Record<string, unknown>).top_p = sampling.topP;
     if (stop != null) {
@@ -802,6 +989,21 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
                 choices: [{ index: 0, delta: { content: event.delta.text }, finish_reason: null, logprobs: null }],
               };
               res.write(`data: ${JSON.stringify(textChunk)}\n\n`);
+              (res as any).flush?.();
+            } else if (event.delta.type === "thinking_delta") {
+              const reasoningChunk = {
+                id: messageId,
+                object: "chat.completion.chunk",
+                created: Math.floor(Date.now() / 1000),
+                model,
+                choices: [{
+                  index: 0,
+                  delta: { reasoning_content: event.delta.thinking },
+                  finish_reason: null,
+                  logprobs: null,
+                }],
+              } as unknown as OpenAI.ChatCompletionChunk;
+              res.write(`data: ${JSON.stringify(reasoningChunk)}\n\n`);
               (res as any).flush?.();
             } else if (event.delta.type === "input_json_delta") {
               const tb = toolUseBlocks[currentToolIndex];
@@ -922,6 +1124,8 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
       const stopArr = Array.isArray(stop) ? stop : [stop];
       if (stopArr.length > 0) generationConfig.stopSequences = stopArr;
     }
+    const geminiThinking = thinkingResolution ? buildGeminiThinkingConfig(thinkingResolution) : undefined;
+    if (geminiThinking) generationConfig.thinkingConfig = geminiThinking;
 
     const geminiConfig: Record<string, unknown> = { generationConfig };
     if (systemInstruction) geminiConfig.systemInstruction = systemInstruction;
@@ -966,7 +1170,17 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
           const parts = candidate?.content?.parts ?? [];
 
           for (const part of parts) {
-            if (part.text) {
+            if (part.text && part.thought) {
+              const reasoningChunk = {
+                id: msgId,
+                object: "chat.completion.chunk",
+                created: Math.floor(Date.now() / 1000),
+                model,
+                choices: [{ index: 0, delta: { reasoning_content: part.text }, finish_reason: null, logprobs: null }],
+              } as unknown as OpenAI.ChatCompletionChunk;
+              res.write(`data: ${JSON.stringify(reasoningChunk)}\n\n`);
+              (res as any).flush?.();
+            } else if (part.text) {
               const textChunk: OpenAI.ChatCompletionChunk = {
                 id: msgId,
                 object: "chat.completion.chunk",
@@ -1028,11 +1242,11 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
                 created: Math.floor(Date.now() / 1000),
                 model,
                 choices: [],
-                usage: {
-                  prompt_tokens: geminiInputTokens,
-                  completion_tokens: geminiOutputTokens,
-                  total_tokens: geminiInputTokens + geminiOutputTokens,
-                },
+                usage: buildUsage(
+                  geminiInputTokens,
+                  geminiOutputTokens,
+                  meta?.thoughtsTokenCount,
+                ),
               };
               res.write(`data: ${JSON.stringify(usageChunk)}\n\n`);
             }
@@ -1070,8 +1284,11 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
       // Fix 4: handle tool calls in non-streaming response
       const toolCalls: OpenAI.ChatCompletionMessageToolCall[] = [];
       let textContent = "";
+      const reasoningTexts: string[] = [];
       for (const part of parts) {
-        if (part.text) {
+        if (part.text && part.thought) {
+          reasoningTexts.push(part.text);
+        } else if (part.text) {
           textContent += part.text;
         } else if (part.functionCall) {
           toolCalls.push({
@@ -1092,6 +1309,7 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
         refusal: null,
       };
       if (toolCalls.length > 0) message.tool_calls = toolCalls;
+      attachReasoningContent(message as unknown as Record<string, unknown>, reasoningTexts);
 
       // Fix 5: real usage from usageMetadata
       const promptTokens = meta?.promptTokenCount ?? 0;
@@ -1108,7 +1326,7 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
           finish_reason: finishReason,
           logprobs: null,
         }],
-        usage: { prompt_tokens: promptTokens, completion_tokens: completionTokens, total_tokens: promptTokens + completionTokens },
+        usage: buildUsage(promptTokens, completionTokens, meta?.thoughtsTokenCount),
       };
 
       req.log.info({
@@ -1130,9 +1348,79 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
 
 // ─── POST /v1/messages (Anthropic native API) ─────────────────────────────────
 
+router.post("/messages/count_tokens", requireAuth, async (req: Request, res: Response) => {
+  const body = req.body as Anthropic.MessageCountTokensParams & {
+    output_config?: Anthropic.OutputConfig;
+    thinking?: Anthropic.ThinkingConfigParam;
+    tools?: Anthropic.ToolUnion[];
+    system?: string | Anthropic.TextBlockParam[];
+  };
+
+  const inputError = validateAnthropicMessagesInput(body);
+  if (inputError) {
+    sendAnthropicInvalidRequest(res, inputError);
+    return;
+  }
+
+  const requestedModel = body.model;
+  const model = stripThinkingModelSuffix(requestedModel);
+  if (!isAnthropicModel(model)) {
+    sendAnthropicInvalidRequest(res, `count_tokens currently supports Anthropic models only. Model "${requestedModel}" is not supported here.`);
+    return;
+  }
+
+  const thinkingResolution = resolveThinkingRequest({
+    model: requestedModel,
+    body: body as unknown as Record<string, unknown>,
+    route: "messages",
+    targetProvider: "anthropic",
+  });
+  logThinkingDecision(req, thinkingResolution, { feature: "count_tokens" });
+
+  const anthropic = getAnthropicClient();
+  const sanitizedAnthropic = sanitizeAnthropicPayload({
+    system: body.system,
+    messages: body.messages,
+    tools: body.tools,
+  });
+
+  if (sanitizedAnthropic.removedPaths.length > 0) {
+    req.log.info({ model, provider: "anthropic", removedPaths: sanitizedAnthropic.removedPaths }, "Sanitized unsupported Anthropic payload fields");
+  }
+
+  const anthropicThinking = buildAnthropicThinkingPayload({
+    resolution: thinkingResolution,
+    maxTokens: 200_000,
+    existingOutputConfig: body.output_config,
+  });
+
+  const countParams: Anthropic.MessageCountTokensParams = {
+    model,
+    messages: sanitizedAnthropic.messages,
+  };
+  if (sanitizedAnthropic.system) countParams.system = sanitizedAnthropic.system;
+  if (sanitizedAnthropic.tools) countParams.tools = sanitizedAnthropic.tools;
+  if (anthropicThinking.thinking) countParams.thinking = anthropicThinking.thinking;
+  if (anthropicThinking.outputConfig) countParams.output_config = anthropicThinking.outputConfig;
+
+  try {
+    const result = await withRetry(() => anthropic.messages.countTokens(countParams));
+    res.json(result);
+  } catch (err: unknown) {
+    const e = err as { status?: number; message?: string };
+    req.log.error({ err, model, provider: "anthropic" }, "Anthropic count_tokens error");
+    res.status(e.status ?? 500).json({ type: "error", error: { type: "api_error", message: e.message ?? "Internal server error" } });
+  }
+});
+
 router.post("/messages", requireAuth, async (req: Request, res: Response) => {
   const body = req.body as Anthropic.MessageCreateParams;
-  const { model } = body;
+  const inputError = validateAnthropicMessagesInput(body);
+  if (inputError) {
+    sendAnthropicInvalidRequest(res, inputError);
+    return;
+  }
+  const requestedModel = body.model;
   const stream = Boolean(body.stream);
   const samplingInput = {
     temperature: body.temperature,
@@ -1141,9 +1429,20 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
     presencePenalty: (body as any).presence_penalty as number | undefined,
   };
 
-  if (!model) {
+  if (!requestedModel) {
     res.status(400).json({ type: "error", error: { type: "invalid_request_error", message: "model is required" } });
     return;
+  }
+  const model = stripThinkingModelSuffix(requestedModel);
+  const targetProvider = isAnthropicModel(model) ? "anthropic"
+    : isOpenAIModel(model) ? "openai"
+    : isGeminiModel(model) ? "gemini"
+    : null;
+  const thinkingResolution = targetProvider
+    ? resolveThinkingRequest({ model: requestedModel, body: body as unknown as Record<string, unknown>, route: "messages", targetProvider })
+    : null;
+  if (thinkingResolution) {
+    logThinkingDecision(req, thinkingResolution);
   }
 
   if (isAnthropicModel(model)) {
@@ -1163,6 +1462,14 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
       req.log.info({ model, provider: "anthropic", removedPaths: sanitizedAnthropic.removedPaths }, "Sanitized unsupported Anthropic payload fields");
     }
 
+    const anthropicThinking = thinkingResolution
+      ? buildAnthropicThinkingPayload({
+          resolution: thinkingResolution,
+          maxTokens: body.max_tokens ?? 8192,
+          existingOutputConfig: body.output_config,
+        })
+      : {};
+
     const anthropicParams: Anthropic.MessageCreateParamsNonStreaming = {
       model,
       max_tokens: body.max_tokens ?? 8192,
@@ -1173,6 +1480,8 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
     if (body.tool_choice) anthropicParams.tool_choice = body.tool_choice;
     if (sampling.temperature !== undefined) anthropicParams.temperature = sampling.temperature;
     if (sampling.topP !== undefined) (anthropicParams as any).top_p = sampling.topP;
+    if (anthropicThinking.thinking) anthropicParams.thinking = anthropicThinking.thinking;
+    if (anthropicThinking.outputConfig) anthropicParams.output_config = anthropicThinking.outputConfig;
     if ((body as any).stop_sequences) (anthropicParams as any).stop_sequences = (body as any).stop_sequences;
 
     if (stream) {
@@ -1216,77 +1525,19 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
 
   if (isOpenAIModel(model)) {
     const sampling = normalizeSamplingParams("openai", samplingInput);
-
     const openai = getOpenAIClient();
-
-    const openAIMessages: OpenAI.ChatCompletionMessageParam[] = [];
-    if (body.system) {
-      const sysText = typeof body.system === "string" ? body.system
-        : (body.system as Anthropic.TextBlockParam[]).map((b) => b.text).join("");
-      openAIMessages.push({ role: "system", content: sysText });
-    }
-
-    for (const msg of body.messages) {
-      if (msg.role === "user") {
-        if (typeof msg.content === "string") {
-          openAIMessages.push({ role: "user", content: msg.content });
-        } else {
-          const content = msg.content as Anthropic.ContentBlockParam[];
-          const toolResults = content.filter((b) => b.type === "tool_result") as Anthropic.ToolResultBlockParam[];
-          const textBlocks = content.filter((b) => b.type === "text") as Anthropic.TextBlockParam[];
-          for (const tr of toolResults) {
-            openAIMessages.push({
-              role: "tool",
-              tool_call_id: tr.tool_use_id,
-              content: typeof tr.content === "string" ? tr.content : JSON.stringify(tr.content),
-            });
-          }
-          if (textBlocks.length > 0) {
-            openAIMessages.push({ role: "user", content: textBlocks.map((b) => b.text).join("") });
-          }
-        }
-      } else if (msg.role === "assistant") {
-        const blocks = Array.isArray(msg.content) ? (msg.content as Anthropic.ContentBlock[]) : [];
-        const toolUseBlocks = blocks.filter((b) => b.type === "tool_use") as Anthropic.ToolUseBlock[];
-        const textBlocks = blocks.filter((b) => b.type === "text") as Anthropic.TextBlock[];
-        const textContent = typeof msg.content === "string" ? msg.content : textBlocks.map((b) => b.text).join("");
-        const assistantMsg: OpenAI.ChatCompletionAssistantMessageParam = {
-          role: "assistant",
-          content: textContent || null,
-        };
-        if (toolUseBlocks.length > 0) {
-          assistantMsg.tool_calls = toolUseBlocks.map((b) => ({
-            id: b.id,
-            type: "function" as const,
-            function: { name: b.name, arguments: JSON.stringify(b.input) },
-          }));
-        }
-        openAIMessages.push(assistantMsg);
-      }
-    }
-
-    const openAITools: OpenAI.ChatCompletionTool[] | undefined = body.tools
-      ?.filter(isAnthropicToolDefinition)
-      .map((t) => ({
-        type: "function" as const,
-        function: {
-          name: t.name,
-          description: t.description,
-          parameters: t.input_schema,
-        },
-      }));
-
-    let openAIToolChoice: OpenAI.ChatCompletionCreateParams["tool_choice"] | undefined;
-    if (body.tool_choice) {
-      const tc = body.tool_choice;
-      if (tc.type === "auto") openAIToolChoice = "auto";
-      else if (tc.type === "any") openAIToolChoice = "required";
-      else if (tc.type === "tool") openAIToolChoice = { type: "function", function: { name: (tc as Anthropic.ToolChoiceTool).name } };
+    let converted: ReturnType<typeof convertAnthropicRequestToOpenAIPayload>;
+    try {
+      converted = convertAnthropicRequestToOpenAIPayload(body);
+    } catch (err) {
+      req.log.warn({ err, model, provider: "openai" }, "Invalid /messages payload for OpenAI conversion");
+      sendAnthropicInvalidRequest(res, "messages payload is not compatible with Anthropic/OpenAI conversion");
+      return;
     }
 
     const openAIParams: OpenAI.ChatCompletionCreateParams = {
       model,
-      messages: openAIMessages,
+      messages: converted.messages,
       stream: false,
     };
     if (body.max_tokens) openAIParams.max_tokens = body.max_tokens;
@@ -1294,8 +1545,10 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
     if (sampling.topP !== undefined) openAIParams.top_p = sampling.topP;
     if (sampling.frequencyPenalty !== undefined) openAIParams.frequency_penalty = sampling.frequencyPenalty;
     if (sampling.presencePenalty !== undefined) openAIParams.presence_penalty = sampling.presencePenalty;
-    if (openAITools) openAIParams.tools = openAITools;
-    if (openAIToolChoice) openAIParams.tool_choice = openAIToolChoice;
+    if (converted.tools) openAIParams.tools = converted.tools;
+    if (converted.toolChoice) openAIParams.tool_choice = converted.toolChoice;
+    const reasoningEffort = thinkingResolution ? buildOpenAIReasoningEffort(thinkingResolution) : undefined;
+    if (reasoningEffort !== undefined) openAIParams.reasoning_effort = reasoningEffort;
 
     if (stream) {
       const keepalive = setupSseHeaders(req, res, () => {
@@ -1307,54 +1560,105 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
       try {
         const msgId = `msg_${Date.now()}`;
         res.write(`event: message_start\ndata: ${JSON.stringify({ type: "message_start", message: { id: msgId, type: "message", role: "assistant", content: [], model, stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } } })}\n\n`);
-        res.write(`event: content_block_start\ndata: ${JSON.stringify({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } })}\n\n`);
         res.write(`event: ping\ndata: ${JSON.stringify({ type: "ping" })}\n\n`);
         (res as any).flush?.();
 
         const openAIStream = await withRetry(() =>
           openai.chat.completions.create({ ...openAIParams, stream: true })
         );
-        let currentToolIndex = -1;
-        let toolBlocks: { id: string; name: string }[] = [];
+        let currentToolBlockIndex = -1;
+        let nextContentBlockIndex = 0;
+        let textBlockIndex = -1;
+        let thinkingBlockIndex = -1;
         let outputTokens = 0;
-        let textBlockActive = true;
+        let textBlockActive = false;
+        let thinkingBlockActive = false;
+
+        const stopTextBlock = () => {
+          if (!textBlockActive || textBlockIndex < 0) return;
+          res.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: textBlockIndex })}\n\n`);
+          textBlockActive = false;
+        };
+
+        const stopThinkingBlock = () => {
+          if (!thinkingBlockActive || thinkingBlockIndex < 0) return;
+          res.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: thinkingBlockIndex })}\n\n`);
+          thinkingBlockActive = false;
+        };
+
+        const startTextBlock = () => {
+          if (textBlockActive) return;
+          stopThinkingBlock();
+          if (currentToolBlockIndex >= 0) {
+            res.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: currentToolBlockIndex })}\n\n`);
+            currentToolBlockIndex = -1;
+          }
+          if (textBlockIndex < 0) textBlockIndex = nextContentBlockIndex++;
+          res.write(`event: content_block_start\ndata: ${JSON.stringify({ type: "content_block_start", index: textBlockIndex, content_block: { type: "text", text: "" } })}\n\n`);
+          textBlockActive = true;
+        };
+
+        const startThinkingBlock = () => {
+          if (thinkingBlockActive) return;
+          stopTextBlock();
+          if (currentToolBlockIndex >= 0) {
+            res.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: currentToolBlockIndex })}\n\n`);
+            currentToolBlockIndex = -1;
+          }
+          if (thinkingBlockIndex < 0) thinkingBlockIndex = nextContentBlockIndex++;
+          res.write(`event: content_block_start\ndata: ${JSON.stringify({ type: "content_block_start", index: thinkingBlockIndex, content_block: { type: "thinking", thinking: "", signature: "" } })}\n\n`);
+          thinkingBlockActive = true;
+        };
 
         for await (const chunk of openAIStream) {
           const choice = chunk.choices[0];
           if (!choice) continue;
-          const delta = choice.delta;
+          const delta = choice.delta as OpenAI.ChatCompletionChunk.Choice["delta"] & { reasoning_content?: unknown };
 
           if (delta.content) {
-            res.write(`event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", index: toolBlocks.length, delta: { type: "text_delta", text: delta.content } })}\n\n`);
+            startTextBlock();
+            res.write(`event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", index: textBlockIndex, delta: { type: "text_delta", text: delta.content } })}\n\n`);
             outputTokens++;
+            (res as any).flush?.();
+          }
+
+          const reasoningTexts = collectReasoningTexts(delta.reasoning_content);
+          for (const reasoningText of reasoningTexts) {
+            startThinkingBlock();
+            res.write(`event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", index: thinkingBlockIndex, delta: { type: "thinking_delta", thinking: reasoningText } })}\n\n`);
             (res as any).flush?.();
           }
 
           if (delta.tool_calls) {
             for (const tc of delta.tool_calls) {
               if (tc.id && tc.function?.name) {
-                if (textBlockActive) {
-                  res.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: 0 })}\n\n`);
-                  textBlockActive = false;
+                stopTextBlock();
+                stopThinkingBlock();
+                if (currentToolBlockIndex >= 0) {
+                  res.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: currentToolBlockIndex })}\n\n`);
                 }
-                currentToolIndex = toolBlocks.length;
-                toolBlocks.push({ id: tc.id, name: tc.function.name });
-                res.write(`event: content_block_start\ndata: ${JSON.stringify({ type: "content_block_start", index: currentToolIndex + 1, content_block: { type: "tool_use", id: tc.id, name: tc.function.name, input: {} } })}\n\n`);
+                currentToolBlockIndex = nextContentBlockIndex++;
+                res.write(`event: content_block_start\ndata: ${JSON.stringify({ type: "content_block_start", index: currentToolBlockIndex, content_block: { type: "tool_use", id: tc.id, name: tc.function.name, input: {} } })}\n\n`);
                 (res as any).flush?.();
               }
               if (tc.function?.arguments) {
-                res.write(`event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", index: currentToolIndex + 1, delta: { type: "input_json_delta", partial_json: tc.function.arguments } })}\n\n`);
+                res.write(`event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", index: currentToolBlockIndex, delta: { type: "input_json_delta", partial_json: tc.function.arguments } })}\n\n`);
                 (res as any).flush?.();
               }
             }
           }
 
           if (choice.finish_reason) {
-            const stopReason = choice.finish_reason === "tool_calls" ? "tool_use" : "end_turn";
-            if (textBlockActive) {
-              res.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: 0 })}\n\n`);
-            } else if (currentToolIndex >= 0) {
-              res.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: currentToolIndex + 1 })}\n\n`);
+            const stopReason = choice.finish_reason === "tool_calls"
+              ? "tool_use"
+              : choice.finish_reason === "length"
+                ? "max_tokens"
+                : "end_turn";
+            stopTextBlock();
+            stopThinkingBlock();
+            if (currentToolBlockIndex >= 0) {
+              res.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: currentToolBlockIndex })}\n\n`);
+              currentToolBlockIndex = -1;
             }
             res.write(`event: message_delta\ndata: ${JSON.stringify({ type: "message_delta", delta: { stop_reason: stopReason, stop_sequence: null }, usage: { output_tokens: outputTokens } })}\n\n`);
             res.write(`event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}\n\n`);
@@ -1380,6 +1684,10 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
       ) as OpenAI.ChatCompletion;
       const choice = openAIResult.choices[0];
       const content: AnthropicClientResponseBlock[] = [];
+      const reasoningText = joinReasoningTexts(
+        collectReasoningTexts((choice.message as unknown as Record<string, unknown>).reasoning_content),
+      );
+      if (reasoningText) content.push({ type: "thinking", thinking: reasoningText, signature: "" });
       if (choice.message.content) content.push({ type: "text", text: choice.message.content });
       if (choice.message.tool_calls) {
         for (const tc of choice.message.tool_calls) {
@@ -1389,7 +1697,11 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
           content.push({ type: "tool_use", id: tc.id, name: tc.function.name, input });
         }
       }
-      const stopReason = choice.finish_reason === "tool_calls" ? "tool_use" : "end_turn";
+      const stopReason = choice.finish_reason === "tool_calls"
+        ? "tool_use"
+        : choice.finish_reason === "length"
+          ? "max_tokens"
+          : "end_turn";
       const anthropicResponse = {
         id: openAIResult.id, type: "message", role: "assistant", content, model,
         stop_reason: stopReason, stop_sequence: null,
@@ -1407,6 +1719,208 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
     return;
   }
 
+  if (isGeminiModel(model)) {
+    const sampling = normalizeSamplingParams("gemini", samplingInput);
+    if (sampling.adjustments.length > 0) {
+      req.log.info({ model, provider: "gemini", samplingAdjustments: sampling.adjustments }, "Gemini sampling normalized");
+    }
+
+    const gemini = getGeminiClient();
+    let converted: ReturnType<typeof convertAnthropicRequestToOpenAIPayload>;
+    try {
+      converted = convertAnthropicRequestToOpenAIPayload(body);
+    } catch (err) {
+      req.log.warn({ err, model, provider: "gemini" }, "Invalid /messages payload for Gemini conversion");
+      sendAnthropicInvalidRequest(res, "messages payload is not compatible with Anthropic/Gemini conversion");
+      return;
+    }
+    const { systemInstruction, contents } = convertMessagesToGemini(converted.messages);
+
+    const generationConfig: Record<string, unknown> = { maxOutputTokens: body.max_tokens ?? 8192 };
+    if (sampling.temperature !== undefined) generationConfig.temperature = sampling.temperature;
+    if (sampling.topP !== undefined) generationConfig.topP = sampling.topP;
+    if ((body as any).stop_sequences) {
+      const stopSequences = (body as any).stop_sequences as string[] | undefined;
+      if (Array.isArray(stopSequences) && stopSequences.length > 0) generationConfig.stopSequences = stopSequences;
+    }
+    const geminiThinking = thinkingResolution ? buildGeminiThinkingConfig(thinkingResolution) : undefined;
+    if (geminiThinking) generationConfig.thinkingConfig = geminiThinking;
+
+    const geminiConfig: Record<string, unknown> = { generationConfig };
+    if (systemInstruction) geminiConfig.systemInstruction = systemInstruction;
+    if (converted.tools && body.tool_choice?.type !== "none") {
+      geminiConfig.tools = convertToolsToGemini(converted.tools);
+      const toolConfig = convertToolChoiceToGemini(converted.toolChoice);
+      if (toolConfig) geminiConfig.toolConfig = toolConfig;
+    }
+
+    if (stream) {
+      const keepalive = setupSseHeaders(req, res, () => {
+        res.write(": keepalive\n\n");
+        (res as any).flush?.();
+      });
+      req.on("close", () => clearInterval(keepalive));
+
+      try {
+        const msgId = `msg_${Date.now()}`;
+        res.write(`event: message_start\ndata: ${JSON.stringify({ type: "message_start", message: { id: msgId, type: "message", role: "assistant", content: [], model, stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } } })}\n\n`);
+        res.write(`event: ping\ndata: ${JSON.stringify({ type: "ping" })}\n\n`);
+        (res as any).flush?.();
+
+        const geminiStream = await withRetry(() =>
+          gemini.models.generateContentStream({ model, contents, config: geminiConfig })
+        );
+
+        let currentToolBlockIndex = -1;
+        let nextContentBlockIndex = 0;
+        let textBlockIndex = -1;
+        let thinkingBlockIndex = -1;
+        let outputTokens = 0;
+        let textBlockActive = false;
+        let thinkingBlockActive = false;
+
+        const stopTextBlock = () => {
+          if (!textBlockActive || textBlockIndex < 0) return;
+          res.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: textBlockIndex })}\n\n`);
+          textBlockActive = false;
+        };
+
+        const stopThinkingBlock = () => {
+          if (!thinkingBlockActive || thinkingBlockIndex < 0) return;
+          res.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: thinkingBlockIndex })}\n\n`);
+          thinkingBlockActive = false;
+        };
+
+        const startTextBlock = () => {
+          if (textBlockActive) return;
+          stopThinkingBlock();
+          if (currentToolBlockIndex >= 0) {
+            res.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: currentToolBlockIndex })}\n\n`);
+            currentToolBlockIndex = -1;
+          }
+          if (textBlockIndex < 0) textBlockIndex = nextContentBlockIndex++;
+          res.write(`event: content_block_start\ndata: ${JSON.stringify({ type: "content_block_start", index: textBlockIndex, content_block: { type: "text", text: "" } })}\n\n`);
+          textBlockActive = true;
+        };
+
+        const startThinkingBlock = () => {
+          if (thinkingBlockActive) return;
+          stopTextBlock();
+          if (currentToolBlockIndex >= 0) {
+            res.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: currentToolBlockIndex })}\n\n`);
+            currentToolBlockIndex = -1;
+          }
+          if (thinkingBlockIndex < 0) thinkingBlockIndex = nextContentBlockIndex++;
+          res.write(`event: content_block_start\ndata: ${JSON.stringify({ type: "content_block_start", index: thinkingBlockIndex, content_block: { type: "thinking", thinking: "", signature: "" } })}\n\n`);
+          thinkingBlockActive = true;
+        };
+
+        for await (const chunk of geminiStream) {
+          const candidate = (chunk as any).candidates?.[0];
+          const parts = candidate?.content?.parts ?? [];
+          for (const part of parts) {
+            if (part.text && part.thought) {
+              startThinkingBlock();
+              res.write(`event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", index: thinkingBlockIndex, delta: { type: "thinking_delta", thinking: part.text } })}\n\n`);
+              (res as any).flush?.();
+            } else if (part.text) {
+              startTextBlock();
+              res.write(`event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", index: textBlockIndex, delta: { type: "text_delta", text: part.text } })}\n\n`);
+              outputTokens++;
+              (res as any).flush?.();
+            } else if (part.functionCall) {
+              stopTextBlock();
+              stopThinkingBlock();
+              if (currentToolBlockIndex >= 0) {
+                res.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: currentToolBlockIndex })}\n\n`);
+              }
+              currentToolBlockIndex = nextContentBlockIndex++;
+              res.write(`event: content_block_start\ndata: ${JSON.stringify({ type: "content_block_start", index: currentToolBlockIndex, content_block: { type: "tool_use", id: `call_${Date.now()}_${currentToolBlockIndex}`, name: part.functionCall.name, input: {} } })}\n\n`);
+              res.write(`event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", index: currentToolBlockIndex, delta: { type: "input_json_delta", partial_json: JSON.stringify(part.functionCall.args ?? {}) } })}\n\n`);
+              (res as any).flush?.();
+            }
+          }
+
+          if (candidate?.finishReason) {
+            stopTextBlock();
+            stopThinkingBlock();
+            if (currentToolBlockIndex >= 0) {
+              res.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: currentToolBlockIndex })}\n\n`);
+              currentToolBlockIndex = -1;
+            }
+            const stopReason = candidate.finishReason === "TOOL_CALLS" || candidate.finishReason === "FUNCTION_CALL"
+              ? "tool_use"
+              : candidate.finishReason === "MAX_TOKENS"
+                ? "max_tokens"
+                : "end_turn";
+            res.write(`event: message_delta\ndata: ${JSON.stringify({ type: "message_delta", delta: { stop_reason: stopReason, stop_sequence: null }, usage: { output_tokens: outputTokens } })}\n\n`);
+            res.write(`event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}\n\n`);
+            (res as any).flush?.();
+          }
+        }
+      } catch (streamErr) {
+        req.log.error({ err: streamErr, model, provider: "gemini" }, "Gemini→Anthropic stream error in /messages");
+        try {
+          const errObj = { type: "error", error: { type: "api_error", message: (streamErr as { message?: string }).message ?? "Stream error" } };
+          res.write(`event: error\ndata: ${JSON.stringify(errObj)}\n\n`);
+        } catch {}
+      } finally {
+        clearInterval(keepalive);
+        res.end();
+      }
+      return;
+    }
+
+    try {
+      const response = await withRetry(() =>
+        gemini.models.generateContent({ model, contents, config: geminiConfig })
+      );
+      const candidate = (response as any).candidates?.[0];
+      const parts = candidate?.content?.parts ?? [];
+      const meta = (response as any).usageMetadata;
+      const content: Array<Anthropic.TextBlockParam | Anthropic.ToolUseBlockParam | Anthropic.ThinkingBlockParam> = [];
+
+      for (const part of parts) {
+        if (part.text && part.thought) {
+          content.push({ type: "thinking", thinking: part.text, signature: part.thoughtSignature ?? "" });
+        } else if (part.text) {
+          content.push({ type: "text", text: part.text });
+        } else if (part.functionCall) {
+          content.push({
+            type: "tool_use",
+            id: `call_${Date.now()}_${content.length}`,
+            name: part.functionCall.name,
+            input: part.functionCall.args ?? {},
+          });
+        }
+      }
+
+      const stopReason = content.some((block) => block.type === "tool_use")
+        ? "tool_use"
+        : candidate?.finishReason === "MAX_TOKENS"
+          ? "max_tokens"
+          : "end_turn";
+      res.json({
+        id: `msg_${Date.now()}`,
+        type: "message",
+        role: "assistant",
+        content,
+        model,
+        stop_reason: stopReason,
+        stop_sequence: null,
+        usage: {
+          input_tokens: meta?.promptTokenCount ?? 0,
+          output_tokens: meta?.candidatesTokenCount ?? 0,
+        },
+      });
+    } catch (err: unknown) {
+      const e = err as { status?: number; message?: string };
+      req.log.error({ err, model, provider: "gemini" }, "Gemini error in /messages");
+      res.status(e.status ?? 500).json({ type: "error", error: { type: "api_error", message: e.message ?? "Internal server error" } });
+    }
+    return;
+  }
+
   res.status(400).json({ type: "error", error: { type: "invalid_request_error", message: `Unsupported model: ${model}` } });
 });
 
@@ -1414,26 +1928,43 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
 
 router.post("/responses", requireAuth, async (req: Request, res: Response) => {
   const body = req.body as Record<string, unknown>;
-  const model = body.model as string | undefined;
+  const requestedModel = body.model as string | undefined;
   const stream = Boolean(body.stream);
 
-  if (!model) {
+  if (!requestedModel) {
     res.status(400).json({ error: { message: "model is required", type: "invalid_request_error" } });
     return;
   }
 
+  const model = stripThinkingModelSuffix(requestedModel);
   if (!isOpenAIModel(model)) {
     res.status(400).json({
       error: {
-        message: `The Responses API only supports OpenAI models (gpt-*, o*). Model "${model}" is not supported here.`,
+        message: `The Responses API only supports OpenAI models (gpt-*, o*). Model "${requestedModel}" is not supported here.`,
         type: "invalid_request_error",
       },
     });
     return;
   }
 
+  const thinkingResolution = resolveThinkingRequest({
+    model: requestedModel,
+    body,
+    route: "responses",
+    targetProvider: "responses",
+  });
+  logThinkingDecision(req, thinkingResolution);
+
   const baseUrl = (process.env.AI_INTEGRATIONS_OPENAI_BASE_URL ?? "").replace(/\/+$/, "");
   const apiKey = process.env.AI_INTEGRATIONS_OPENAI_API_KEY ?? "";
+  const upstreamBody = stripAllKnownThinkingFields(body);
+  upstreamBody.model = model;
+  const nextReasoning = buildResponsesReasoning(
+    thinkingResolution,
+    isPlainObject(upstreamBody.reasoning) ? upstreamBody.reasoning : undefined,
+  );
+  if (nextReasoning) upstreamBody.reasoning = nextReasoning;
+  else delete upstreamBody.reasoning;
 
   const { controller, clear } = makeAbortController();
   req.on("close", clear);
@@ -1447,7 +1978,7 @@ router.post("/responses", requireAuth, async (req: Request, res: Response) => {
         "Authorization": `Bearer ${apiKey}`,
         "Accept": stream ? "text/event-stream" : "application/json",
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify(upstreamBody),
       signal: controller.signal,
     }));
   } catch (fetchErr) {
@@ -1497,6 +2028,10 @@ router.post("/responses", requireAuth, async (req: Request, res: Response) => {
     req.log.error({ err, model, provider: "openai" }, "Responses API non-stream error");
     res.status(upstream.status || 500).json({ error: { message: "Upstream error", type: "api_error" } });
   }
+});
+
+router.use((req: Request, res: Response) => {
+  sendOpenAIInvalidRequest(res, `Unknown v1 route: ${req.method} ${req.path}`, 404);
 });
 
 export default router;

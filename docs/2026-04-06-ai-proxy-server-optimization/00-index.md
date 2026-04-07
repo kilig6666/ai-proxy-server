@@ -26,6 +26,12 @@
    - `cache_control` 白名单清洗
    - `/v1/chat/completions` 与 `/v1/messages` 共用清洗逻辑
 
+4. `04-thinking-adapter.md`
+   - Thinking / Reasoning 统一提取
+   - 模型后缀覆盖
+   - `/v1/chat/completions`、`/v1/messages`、`/v1/responses` 三条入口映射
+   - 自动剥离与响应回填
+
 ## 并行开发建议分工
 
 ### Worktree A
