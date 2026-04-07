@@ -88,8 +88,9 @@ function checkRateLimit(key: string): { allowed: boolean; retryAfter?: number } 
 
 function isRetryableError(err: unknown): boolean {
   if (!err || typeof err !== "object") return false;
-  const e = err as { status?: number; code?: string };
-  if ([429, 502, 503, 504].includes(e.status ?? 0)) return true;
+  const e = err as { status?: number; code?: string; message?: string };
+  const status = inferUpstreamErrorStatus(err);
+  if ([429, 502, 503, 504].includes(status ?? e.status ?? 0)) return true;
   if (["ECONNRESET", "ETIMEDOUT", "ENOTFOUND"].includes(e.code ?? "")) return true;
   return false;
 }
@@ -303,6 +304,112 @@ function sendAnthropicAuthUnavailable(res: Response) {
 
 function sendOpenAIInvalidRequest(res: Response, message: string, status = 400) {
   res.status(status).json({ error: { message, type: "invalid_request_error", code: status } });
+}
+
+type NormalizedProviderError = {
+  status: number;
+  message: string;
+  openAIType: "api_error" | "rate_limit_error" | "authentication_error";
+  openAICode: string | number;
+  anthropicType: "api_error" | "rate_limit_error" | "authentication_error";
+};
+
+function extractWrappedErrorPayload(rawMessage: string): { status?: number; message?: string } | null {
+  const firstBrace = rawMessage.indexOf("{");
+  const lastBrace = rawMessage.lastIndexOf("}");
+  if (firstBrace < 0 || lastBrace <= firstBrace) return null;
+
+  const payloadText = rawMessage.slice(firstBrace, lastBrace + 1);
+  try {
+    const parsed = JSON.parse(payloadText) as Record<string, unknown>;
+    const error = isPlainObject(parsed.error) ? parsed.error : undefined;
+    const code = typeof error?.code === "number" ? error.code : undefined;
+    const message = typeof error?.message === "string" ? error.message : undefined;
+    if (!code && !message) return null;
+    return { status: code, message };
+  } catch {
+    return null;
+  }
+}
+
+function inferUpstreamErrorStatus(err: unknown): number | undefined {
+  if (!err || typeof err !== "object") return undefined;
+  const candidate = err as { status?: number; code?: number | string; message?: string };
+  if (typeof candidate.status === "number") return candidate.status;
+  if (typeof candidate.code === "number") return candidate.code;
+  if (typeof candidate.message === "string") {
+    const wrapped = extractWrappedErrorPayload(candidate.message);
+    if (wrapped?.status) return wrapped.status;
+    const match = candidate.message.match(/(^|\D)(429|401|400|404|500|502|503|504)(\D|$)/);
+    if (match) return Number(match[2]);
+    if (candidate.message.includes("RESOURCE_EXHAUSTED")) return 429;
+  }
+  return undefined;
+}
+
+function normalizeProviderError(err: unknown, fallbackMessage = "Internal server error"): NormalizedProviderError {
+  const rawMessage = typeof (err as { message?: unknown })?.message === "string"
+    ? (err as { message: string }).message
+    : "";
+  const wrapped = rawMessage ? extractWrappedErrorPayload(rawMessage) : null;
+  const status = inferUpstreamErrorStatus(err) ?? 500;
+  const message = wrapped?.message?.trim() || rawMessage.trim() || fallbackMessage;
+
+  if (status === 401 || message.includes("auth_unavailable")) {
+    return {
+      status: 401,
+      message,
+      openAIType: "authentication_error",
+      openAICode: 401,
+      anthropicType: "authentication_error",
+    };
+  }
+
+  if (
+    status === 429
+    || message.includes("RESOURCE_EXHAUSTED")
+    || /quota/i.test(message)
+    || /rate limit/i.test(message)
+  ) {
+    return {
+      status: 429,
+      message,
+      openAIType: "rate_limit_error",
+      openAICode: 429,
+      anthropicType: "rate_limit_error",
+    };
+  }
+
+  return {
+    status,
+    message,
+    openAIType: "api_error",
+    openAICode: "api_error",
+    anthropicType: "api_error",
+  };
+}
+
+function sendOpenAIProviderError(res: Response, err: unknown, fallbackMessage = "Internal server error") {
+  const normalized = normalizeProviderError(err, fallbackMessage);
+  res.status(normalized.status).json({
+    error: {
+      message: normalized.message,
+      type: normalized.openAIType,
+      param: "",
+      code: normalized.openAICode,
+    },
+  });
+}
+
+function sendAnthropicProviderError(res: Response, err: unknown, fallbackMessage = "Internal server error") {
+  const normalized = normalizeProviderError(err, fallbackMessage);
+  res.status(normalized.status).json({
+    type: "error",
+    error: {
+      type: normalized.anthropicType,
+      message: normalized.message,
+    },
+  });
 }
 
 function stripAnthropicOutputConfigEffort(outputConfig: Anthropic.OutputConfig | undefined): Anthropic.OutputConfig | undefined {
@@ -1124,9 +1231,8 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
         }, "OpenAI request complete");
         res.json(result);
       } catch (err: unknown) {
-        const e = err as { status?: number; message?: string };
         req.log.error({ err, model, provider: "openai" }, "OpenAI error");
-        res.status(e.status ?? 500).json({ error: { message: e.message ?? "Internal server error", type: "api_error" } });
+        sendOpenAIProviderError(res, err);
       }
     }
     return;
@@ -1379,9 +1485,8 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
       }, "Anthropic request complete");
       res.json(convertAnthropicToOpenAI(finalMsg, model));
     } catch (err: unknown) {
-      const e = err as { status?: number; message?: string };
       req.log.error({ err, model, provider: "anthropic" }, "Anthropic error");
-      res.status(e.status ?? 500).json({ error: { message: e.message ?? "Internal server error", type: "api_error" } });
+      sendOpenAIProviderError(res, err);
     }
     return;
   }
@@ -1632,9 +1737,8 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
       }, "Gemini request complete");
       res.json(result);
     } catch (err: unknown) {
-      const e = err as { status?: number; message?: string };
       req.log.error({ err, model, provider: "gemini" }, "Gemini error");
-      res.status(e.status ?? 500).json({ error: { message: e.message ?? "Internal server error", type: "api_error" } });
+      sendOpenAIProviderError(res, err);
     }
     return;
   }
@@ -1728,9 +1832,8 @@ router.post("/messages/count_tokens", requireAuth, async (req: Request, res: Res
     const result = await withRetry(() => anthropic.messages.countTokens(countParams, anthropicRequestOptions));
     res.json(result);
   } catch (err: unknown) {
-    const e = err as { status?: number; message?: string };
     req.log.error({ err, model, provider: "anthropic" }, "Anthropic count_tokens error");
-    res.status(e.status ?? 500).json({ type: "error", error: { type: "api_error", message: e.message ?? "Internal server error" } });
+    sendAnthropicProviderError(res, err);
   }
 });
 
@@ -1861,7 +1964,8 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
       } catch (streamErr) {
         req.log.error({ err: streamErr, model, provider: "anthropic" }, "Anthropic native stream error");
         try {
-          const errObj = { type: "error", error: { type: "api_error", message: (streamErr as { message?: string }).message ?? "Stream error" } };
+          const normalized = normalizeProviderError(streamErr, "Stream error");
+          const errObj = { type: "error", error: { type: normalized.anthropicType, message: normalized.message } };
           res.write(`event: error\ndata: ${JSON.stringify(errObj)}\n\n`);
         } catch {}
       } finally {
@@ -1877,9 +1981,8 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
       );
       res.json(finalMsg);
     } catch (err: unknown) {
-      const e = err as { status?: number; message?: string };
       req.log.error({ err, model, provider: "anthropic" }, "Anthropic native error");
-      res.status(e.status ?? 500).json({ type: "error", error: { type: "api_error", message: e.message ?? "Internal server error" } });
+      sendAnthropicProviderError(res, err);
     }
     return;
   }
@@ -2029,7 +2132,8 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
       } catch (streamErr) {
         req.log.error({ err: streamErr, model, provider: "openai" }, "OpenAI→Anthropic stream error in /messages");
         try {
-          const errObj = { type: "error", error: { type: "api_error", message: (streamErr as { message?: string }).message ?? "Stream error" } };
+          const normalized = normalizeProviderError(streamErr, "Stream error");
+          const errObj = { type: "error", error: { type: normalized.anthropicType, message: normalized.message } };
           res.write(`event: error\ndata: ${JSON.stringify(errObj)}\n\n`);
         } catch {}
       } finally {
@@ -2073,9 +2177,8 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
       };
       res.json(anthropicResponse);
     } catch (err: unknown) {
-      const e = err as { status?: number; message?: string };
       req.log.error({ err, model, provider: "openai" }, "OpenAI error in /messages");
-      res.status(e.status ?? 500).json({ type: "error", error: { type: "api_error", message: e.message ?? "Internal server error" } });
+      sendAnthropicProviderError(res, err);
     }
     return;
   }
@@ -2238,7 +2341,8 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
       } catch (streamErr) {
         req.log.error({ err: streamErr, model, provider: "gemini" }, "Gemini→Anthropic stream error in /messages");
         try {
-          const errObj = { type: "error", error: { type: "api_error", message: (streamErr as { message?: string }).message ?? "Stream error" } };
+          const normalized = normalizeProviderError(streamErr, "Stream error");
+          const errObj = { type: "error", error: { type: normalized.anthropicType, message: normalized.message } };
           res.write(`event: error\ndata: ${JSON.stringify(errObj)}\n\n`);
         } catch {}
       } finally {
@@ -2291,9 +2395,8 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
         },
       });
     } catch (err: unknown) {
-      const e = err as { status?: number; message?: string };
       req.log.error({ err, model, provider: "gemini" }, "Gemini error in /messages");
-      res.status(e.status ?? 500).json({ type: "error", error: { type: "api_error", message: e.message ?? "Internal server error" } });
+      sendAnthropicProviderError(res, err);
     }
     return;
   }
@@ -2384,7 +2487,7 @@ router.post("/responses", requireAuth, async (req: Request, res: Response) => {
   } catch (fetchErr) {
     clear();
     req.log.error({ err: fetchErr, model, provider: "openai" }, "Responses API fetch error");
-    res.status(502).json({ error: { message: "Upstream request failed", type: "api_error" } });
+    sendOpenAIProviderError(res, fetchErr, "Upstream request failed");
     return;
   }
 
@@ -2422,11 +2525,23 @@ router.post("/responses", requireAuth, async (req: Request, res: Response) => {
   try {
     const data = await upstream.json() as unknown;
     clear();
-    res.status(upstream.status).json(data);
+    if (upstream.ok) {
+      res.status(upstream.status).json(data);
+      return;
+    }
+    const normalized = normalizeProviderError({ status: upstream.status, message: isPlainObject(data) ? JSON.stringify(data) : "Upstream error" }, "Upstream error");
+    res.status(normalized.status).json({
+      error: {
+        message: normalized.message,
+        type: normalized.openAIType,
+        param: "",
+        code: normalized.openAICode,
+      },
+    });
   } catch (err) {
     clear();
     req.log.error({ err, model, provider: "openai" }, "Responses API non-stream error");
-    res.status(upstream.status || 500).json({ error: { message: "Upstream error", type: "api_error" } });
+    sendOpenAIProviderError(res, { status: upstream.status || 500, message: "Upstream error" }, "Upstream error");
   }
 });
 
