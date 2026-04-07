@@ -1,6 +1,6 @@
 # AI Proxy Server
 
-> **by kilig** — v4.0
+> **by kilig** — v4.1
 
 一个面向 OpenAI / Anthropic / Gemini 的统一 AI 代理服务。
 
@@ -922,7 +922,7 @@ pnpm --filter @workspace/api-spec run codegen
 
 ## 10. 本次 README 维护更新点
 
-### v4.0 重点变更摘要
+### v4.1 重点变更摘要
 
 本轮除 README 重写外，还同步落地了以下兼容性修复：
 
@@ -947,7 +947,7 @@ pnpm --filter @workspace/api-spec run codegen
    - `tool_choice.type = any/tool` 时自动剥离 thinking
    - 开启 thinking 且 `temperature != 1` 时自动归一为 `1`
 6. **门户版本信息同步**
-   - README 与门户右上角、登录页版本号已同步更新为 **v4.0**
+   - README 与门户右上角、登录页版本号已同步更新为 **v4.1**
 
 本次按当前代码修正了以下内容：
 
