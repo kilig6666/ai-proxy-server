@@ -1,6 +1,6 @@
 # AI Proxy Server
 
-> **by kilig** — v2.6
+> **by kilig** — v3.0
 
 一个支持 OpenAI / Anthropic / Gemini 三家供应商的统一反向代理服务，对外暴露标准 OpenAI 兼容接口（`/v1`），并附带一个深色/浅色主题、中英双语的 React 管理门户。
 
@@ -201,11 +201,26 @@ workspace/
 
 ### 代理接口（`/v1`）
 
-所有代理接口均需在请求头携带 Bearer Token：
+所有代理接口都需要携带本服务的 `proxyApiKey`。支持以下写法：
 
 ```
 Authorization: Bearer <proxyApiKey>
 ```
+
+或：
+
+```
+x-proxy-api-key: <proxyApiKey>
+```
+
+兼容旧写法：
+
+```
+x-api-key: <proxyApiKey>
+```
+
+> 推荐长期把 `Authorization` / `x-proxy-api-key` 用作 **本服务 hop 鉴权**。  
+> 对于 Anthropic 原生协议的多级代理链路，建议把 `x-api-key` 留给 **Anthropic provider 鉴权**。
 
 ---
 
@@ -317,9 +332,18 @@ Anthropic 原生 Messages API 格式入口，支持 Claude / OpenAI / Gemini 模
 - 若目标是 OpenAI / Codex，会自动转成 `reasoning_effort`
 - 若目标是 Gemini，会自动转成 `generationConfig.thinkingConfig`
 
+**多级代理鉴权建议：**
+- 推荐：
+  - `x-proxy-api-key: <proxyApiKey>` → 本服务鉴权
+  - `x-api-key: <anthropicProviderKey>` → 上游 Anthropic 鉴权
+- 兼容旧链路：
+  - `x-api-key == <proxyApiKey>` 仍可作为本服务鉴权
+  - 若未额外提供上游 Anthropic Key，则自动回退到 `AI_INTEGRATIONS_ANTHROPIC_API_KEY`
+
 ```bash
 curl https://your-server/v1/messages \
-  -H "Authorization: Bearer admin123" \
+  -H "x-proxy-api-key: admin123" \
+  -H "x-api-key: YOUR_ANTHROPIC_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "claude-sonnet-4-6",
@@ -336,10 +360,12 @@ Anthropic 原生 token counting 接口。
 
 - 当前仅支持 Anthropic 模型
 - 若 `messages` 不是数组，会返回 `400 invalid_request_error`
+- 多级代理场景下，鉴权规则与 `/v1/messages` 相同
 
 ```bash
 curl https://your-server/v1/messages/count_tokens \
-  -H "Authorization: Bearer admin123" \
+  -H "x-proxy-api-key: admin123" \
+  -H "x-api-key: YOUR_ANTHROPIC_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "claude-sonnet-4-6",
@@ -487,8 +513,13 @@ OpenAI Responses API 透传，**仅支持 OpenAI 模型**（`gpt-*` / `o*`）。
 |-----------|------|
 | `PROXY_API_KEY` | proxyApiKey 默认值（config.json 不存在时生效） |
 | `SESSION_SECRET` | 预留，当前版本暂未使用 |
+| `AI_INTEGRATIONS_ANTHROPIC_BASE_URL` | Anthropic 上游地址（Replit AI Integrations 注入） |
+| `AI_INTEGRATIONS_ANTHROPIC_API_KEY` | Anthropic 上游回退凭据（Replit AI Integrations 注入） |
 
-> 上游 AI 供应商的 API Key（OpenAI / Anthropic / Gemini）由调用方自行持有，本代理服务本身**不存储**上游 Key，仅转发请求并携带调用方在请求中传入的 Key（或由供应商 SDK 从环境变量读取）。
+> OpenAI / Gemini 仍按原有模式处理。Anthropic 原生协议（`/v1/messages`、`/v1/messages/count_tokens`）支持两种上游鉴权来源：  
+> 1. 请求中显式传入的 **独立** `x-api-key` / `Authorization`  
+> 2. Replit 环境中的 `AI_INTEGRATIONS_ANTHROPIC_API_KEY` 回退  
+> 推荐将 `proxyApiKey` 与 Anthropic provider key 分开传递，避免多级代理链路混淆。
 
 ---
 
@@ -565,7 +596,7 @@ pnpm --filter @workspace/api-portal run build
 
 | 版本 | 内容 |
 |------|------|
-| v2.6 | 默认明亮主题；隐藏余额卡片；多账号部署文档完善 |
+| v3.0 | 默认明亮主题；隐藏余额卡片；多账号部署文档完善 |
 | v2.4 | Anthropic 原生协议 x-api-key 认证支持；/v1/v1 路径兼容；默认凭据更新为 admin999 |
 | v2.3 | 修复 401 自动恢复；中英双语；左侧导航栏；模型列表 Tab；28 个模型全量同步 |
 | v2.2 | 添加频率限制 (120 RPM)；Admin Token 机制；配置持久化 |

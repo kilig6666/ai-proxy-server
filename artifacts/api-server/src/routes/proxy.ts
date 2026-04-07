@@ -113,23 +113,124 @@ function makeAbortController(): { controller: AbortController; clear: () => void
   return { controller, clear: () => clearTimeout(timer) };
 }
 
+type ProxyAuthSource = "authorization" | "x-proxy-api-key" | "x-api-key";
+
+type ResolvedProxyAuth = {
+  ok: boolean;
+  source?: ProxyAuthSource;
+  rateLimitKey?: string;
+};
+
+type AnthropicUpstreamAuthSource = "x-api-key" | "authorization" | "env" | "missing";
+
+type ResolvedAnthropicUpstreamAuth = {
+  source: AnthropicUpstreamAuthSource;
+  missing: boolean;
+  usedEnvFallback: boolean;
+  requestOptions?: Anthropic.RequestOptions;
+};
+
+function readHeaderValue(header: string | string[] | undefined): string | undefined {
+  const value = Array.isArray(header) ? header[0] : header;
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function resolveProxyAuth(req: Request): ResolvedProxyAuth {
+  const proxyKey = getConfig().proxyApiKey;
+  const authHeader = readHeaderValue(req.headers.authorization as string | string[] | undefined);
+  const xProxyApiKey = readHeaderValue(req.headers["x-proxy-api-key"] as string | string[] | undefined);
+  const xApiKey = readHeaderValue(req.headers["x-api-key"] as string | string[] | undefined);
+
+  if (authHeader === `Bearer ${proxyKey}`) {
+    return { ok: true, source: "authorization", rateLimitKey: `authorization:${authHeader}` };
+  }
+
+  if (xProxyApiKey === proxyKey) {
+    return { ok: true, source: "x-proxy-api-key", rateLimitKey: `x-proxy-api-key:${xProxyApiKey}` };
+  }
+
+  if (xApiKey === proxyKey) {
+    return { ok: true, source: "x-api-key", rateLimitKey: `x-api-key:${xApiKey}` };
+  }
+
+  return { ok: false };
+}
+
+function getProxyAuthSource(res: Response): ProxyAuthSource | undefined {
+  return (res.locals as { proxyAuthSource?: ProxyAuthSource }).proxyAuthSource;
+}
+
+function resolveAnthropicUpstreamAuth(req: Request): ResolvedAnthropicUpstreamAuth {
+  const proxyKey = getConfig().proxyApiKey;
+  const authHeader = readHeaderValue(req.headers.authorization as string | string[] | undefined);
+  const xApiKey = readHeaderValue(req.headers["x-api-key"] as string | string[] | undefined);
+  const proxyBearer = `Bearer ${proxyKey}`;
+
+  if (xApiKey && xApiKey !== proxyKey) {
+    return {
+      source: "x-api-key",
+      missing: false,
+      usedEnvFallback: false,
+      requestOptions: { headers: { "X-Api-Key": xApiKey } },
+    };
+  }
+
+  if (authHeader && authHeader !== proxyBearer) {
+    return {
+      source: "authorization",
+      missing: false,
+      usedEnvFallback: false,
+      requestOptions: { headers: { Authorization: authHeader } },
+    };
+  }
+
+  const envApiKey = process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY?.trim();
+  if (envApiKey) {
+    return {
+      source: "env",
+      missing: false,
+      usedEnvFallback: true,
+      requestOptions: { headers: { "X-Api-Key": envApiKey } },
+    };
+  }
+
+  return { source: "missing", missing: true, usedEnvFallback: false };
+}
+
+function logAnthropicUpstreamAuth(req: Request, res: Response, meta: { model: string; feature: "messages" | "count_tokens"; auth: ResolvedAnthropicUpstreamAuth }) {
+  const logMeta = {
+    model: meta.model,
+    provider: "anthropic",
+    feature: meta.feature,
+    proxyAuthSource: getProxyAuthSource(res),
+    anthropicAuthSource: meta.auth.source,
+    anthropicAuthMissing: meta.auth.missing,
+    anthropicAuthUsedEnvFallback: meta.auth.usedEnvFallback,
+  };
+
+  if (meta.auth.missing) {
+    req.log.warn(logMeta, "Anthropic upstream auth unavailable");
+    return;
+  }
+
+  req.log.info(logMeta, "Anthropic upstream auth resolved");
+}
+
 // ─── Auth + rate-limit middleware ─────────────────────────────────────────────
 
 function requireAuth(req: Request, res: Response, next: () => void) {
-  const proxyKey = getConfig().proxyApiKey;
-  const authHeader = req.headers.authorization;
-  const xApiKey = req.headers["x-api-key"] as string | undefined;
+  const resolvedAuth = resolveProxyAuth(req);
 
-  const fromBearer = authHeader === `Bearer ${proxyKey}`;
-  const fromXApiKey = xApiKey === proxyKey;
-
-  if (!fromBearer && !fromXApiKey) {
+  if (!resolvedAuth.ok) {
     res.status(401).json({ error: { message: "Unauthorized", type: "authentication_error", code: 401 } });
     return;
   }
 
-  const rateLimitKey = authHeader ?? `x-api-key:${xApiKey}`;
-  const { allowed, retryAfter } = checkRateLimit(rateLimitKey);
+  (res.locals as { proxyAuthSource?: ProxyAuthSource }).proxyAuthSource = resolvedAuth.source;
+
+  const { allowed, retryAfter } = checkRateLimit(resolvedAuth.rateLimitKey ?? "proxy:unknown");
   if (!allowed) {
     res.setHeader("Retry-After", String(retryAfter ?? 60));
     res.status(429).json({ error: { message: "Rate limit exceeded. Please retry later.", type: "rate_limit_error", code: 429 } });
@@ -144,6 +245,16 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 function sendAnthropicInvalidRequest(res: Response, message: string, status = 400) {
   res.status(status).json({ type: "error", error: { type: "invalid_request_error", message } });
+}
+
+function sendAnthropicAuthUnavailable(res: Response) {
+  res.status(401).json({
+    type: "error",
+    error: {
+      type: "authentication_error",
+      message: "auth_unavailable: no upstream Anthropic auth available; provide a distinct x-api-key or Authorization header for Anthropic, or configure AI_INTEGRATIONS_ANTHROPIC_API_KEY",
+    },
+  });
 }
 
 function sendOpenAIInvalidRequest(res: Response, message: string, status = 400) {
@@ -1377,6 +1488,13 @@ router.post("/messages/count_tokens", requireAuth, async (req: Request, res: Res
   });
   logThinkingDecision(req, thinkingResolution, { feature: "count_tokens" });
 
+  const anthropicUpstreamAuth = resolveAnthropicUpstreamAuth(req);
+  logAnthropicUpstreamAuth(req, res, { model, feature: "count_tokens", auth: anthropicUpstreamAuth });
+  if (anthropicUpstreamAuth.missing) {
+    sendAnthropicAuthUnavailable(res);
+    return;
+  }
+
   const anthropic = getAnthropicClient();
   const sanitizedAnthropic = sanitizeAnthropicPayload({
     system: body.system,
@@ -1404,7 +1522,7 @@ router.post("/messages/count_tokens", requireAuth, async (req: Request, res: Res
   if (anthropicThinking.outputConfig) countParams.output_config = anthropicThinking.outputConfig;
 
   try {
-    const result = await withRetry(() => anthropic.messages.countTokens(countParams));
+    const result = await withRetry(() => anthropic.messages.countTokens(countParams, anthropicUpstreamAuth.requestOptions));
     res.json(result);
   } catch (err: unknown) {
     const e = err as { status?: number; message?: string };
@@ -1451,6 +1569,13 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
       req.log.info({ model, provider: "anthropic", samplingAdjustments: sampling.adjustments }, "Anthropic sampling normalized");
     }
 
+    const anthropicUpstreamAuth = resolveAnthropicUpstreamAuth(req);
+    logAnthropicUpstreamAuth(req, res, { model, feature: "messages", auth: anthropicUpstreamAuth });
+    if (anthropicUpstreamAuth.missing) {
+      sendAnthropicAuthUnavailable(res);
+      return;
+    }
+
     const anthropic = getAnthropicClient();
     const sanitizedAnthropic = sanitizeAnthropicPayload({
       system: body.system,
@@ -1492,7 +1617,7 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
       req.on("close", () => clearInterval(keepalive));
 
       try {
-        const anthropicStream = anthropic.messages.stream(anthropicParams);
+        const anthropicStream = anthropic.messages.stream(anthropicParams, anthropicUpstreamAuth.requestOptions);
         for await (const event of anthropicStream) {
           res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
           (res as any).flush?.();
@@ -1512,7 +1637,7 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
 
     try {
       const finalMsg = await withRetry(() =>
-        anthropic.messages.stream(anthropicParams).finalMessage()
+        anthropic.messages.stream(anthropicParams, anthropicUpstreamAuth.requestOptions).finalMessage()
       );
       res.json(finalMsg);
     } catch (err: unknown) {
