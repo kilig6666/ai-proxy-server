@@ -4,7 +4,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { GoogleGenAI } from "@google/genai";
 import { getConfig } from "../lib/config.js";
 import { fetchCredits, buildCreditsJson } from "../lib/credits.js";
-import { listModelObjects, requestHasVisionInput, supportsVision } from "../lib/model-catalog.js";
+import { getModelDefinition, listModelObjects, requestHasVisionInput, supportsVision } from "../lib/model-catalog.js";
 import { normalizeSamplingParams } from "../lib/sampling.js";
 import {
   buildAnthropicThinkingPayload,
@@ -493,6 +493,15 @@ function isAnthropicModel(model: string): boolean {
 
 function isGeminiModel(model: string): boolean {
   return stripThinkingModelSuffix(model).startsWith("gemini-");
+}
+
+function shouldUseOpenAIMaxCompletionTokens(model: string): boolean {
+  const baseModel = stripThinkingModelSuffix(model);
+  const definition = getModelDefinition(baseModel);
+  if (definition?.provider === "openai") {
+    return definition.thinking.supported;
+  }
+  return baseModel.startsWith("o") || baseModel.startsWith("gpt-5");
 }
 
 // ─── Fix 6: Gemini finish_reason mapping ──────────────────────────────────────
@@ -1172,7 +1181,13 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
     if (tools) openAIParams.tools = tools;
     if (toolChoice) openAIParams.tool_choice = toolChoice;
     if (sampling.temperature !== undefined) openAIParams.temperature = sampling.temperature;
-    if (maxTokens !== undefined) openAIParams.max_tokens = maxTokens;
+    if (maxTokens !== undefined) {
+      if (shouldUseOpenAIMaxCompletionTokens(model)) {
+        (openAIParams as unknown as Record<string, unknown>).max_completion_tokens = maxTokens;
+      } else {
+        openAIParams.max_tokens = maxTokens;
+      }
+    }
     // Fix 7: forward extra sampling params
     if (sampling.topP !== undefined) openAIParams.top_p = sampling.topP;
     if (stop != null) openAIParams.stop = stop as string | string[];
@@ -2004,7 +2019,13 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
       messages: converted.messages,
       stream: false,
     };
-    if (body.max_tokens) openAIParams.max_tokens = body.max_tokens;
+    if (body.max_tokens) {
+      if (shouldUseOpenAIMaxCompletionTokens(model)) {
+        (openAIParams as unknown as Record<string, unknown>).max_completion_tokens = body.max_tokens;
+      } else {
+        openAIParams.max_tokens = body.max_tokens;
+      }
+    }
     if (sampling.temperature !== undefined) openAIParams.temperature = sampling.temperature;
     if (sampling.topP !== undefined) openAIParams.top_p = sampling.topP;
     if (sampling.frequencyPenalty !== undefined) openAIParams.frequency_penalty = sampling.frequencyPenalty;
