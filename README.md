@@ -1,6 +1,6 @@
 # AI Proxy Server
 
-> **by kilig** — v3.1
+> **by kilig** — v4.0
 
 一个面向 OpenAI / Anthropic / Gemini 的统一 AI 代理服务。
 
@@ -210,6 +210,8 @@ AI Proxy Server
 
 - Anthropic 手动 thinking budget 模式会自动压到 `< max_tokens`
 - 若 `max_tokens` 太小，无法满足 `max_tokens > thinking.budget_tokens`，代理会自动关闭 manual thinking，避免上游 `400`
+- Claude 4.6 才会走 `thinking.type=adaptive` + `output_config.effort`
+- Claude 4.5 / 4.1 会自动回退到 budget thinking，不再下发 `output_config.effort`
 
 #### sampling 参数规范化
 
@@ -217,6 +219,7 @@ AI Proxy Server
 
 - Anthropic：
   - `temperature` 与 `top_p` 同时出现时，会丢弃 `top_p`
+  - 开启 thinking 时，若 `temperature != 1`，会自动归一化到 `1`
   - 丢弃 `frequency_penalty`
   - 丢弃 `presence_penalty`
 - Gemini：
@@ -682,12 +685,17 @@ x-api-key: <proxyApiKey>
 - 代理会做跨协议转换
 - 多级代理时支持独立上游 Anthropic 鉴权
 - 当最终路由到 Anthropic 且使用手动 budget thinking 时，代理会保证 `max_tokens > thinking.budget_tokens`
+- 当最终路由到 Anthropic 时，仅 Claude 4.6 会下发 `output_config.effort`
+- 为兼容 Claude Code，若 `tool_choice.type` 为 `any` / `tool`，代理会自动移除 thinking
+- 支持透传 `anthropic-beta` 请求头，也支持从请求体 `betas` 读取并转发到上游
 
 ### `POST /v1/messages/count_tokens`
 
 - Anthropic 原生 token counting
 - 当前只支持 **Anthropic 模型**
 - 输入不合法会返回 `400 invalid_request_error`
+- 为兼容旧 Anthropic 网关 / 反代，代理不会向 `count_tokens` 上游发送 `output_config`
+- 支持透传 `anthropic-beta` 请求头，也支持从请求体 `betas` 读取并转发到上游
 
 ### `POST /v1/responses`
 
@@ -899,6 +907,33 @@ pnpm --filter @workspace/api-spec run codegen
 ---
 
 ## 10. 本次 README 维护更新点
+
+### v4.0 重点变更摘要
+
+本轮除 README 重写外，还同步落地了以下兼容性修复：
+
+1. **Anthropic 多级代理鉴权兼容**
+   - 分离本跳 proxy auth 与 Anthropic 上游 auth
+   - 新增 `x-proxy-api-key`
+   - `/v1/messages`、`/v1/messages/count_tokens` 支持独立上游鉴权透传
+   - 缺少上游 Anthropic auth 时返回结构化错误，不再误报 500
+2. **Thinking 全链路适配**
+   - 统一支持 `/v1/chat/completions`、`/v1/messages`、`/v1/responses`
+   - 支持模型后缀覆盖、能力校验、自动剥离、跨协议映射
+3. **Anthropic Thinking 约束兼容**
+   - 自动处理 `max_tokens` 与 `thinking.budget_tokens` 的冲突
+   - 无法满足上游约束时自动关闭 manual thinking，避免直接 400
+4. **`output_config` 兼容修复**
+   - 仅 Claude 4.6 使用 `adaptive + output_config.effort`
+   - Claude 4.5 / 4.1 自动回退到 budget thinking
+   - `/v1/messages/count_tokens` 不再向上游发送 `output_config`
+5. **Claude Code 兼容增强**
+   - 支持 `anthropic-beta` 请求头透传
+   - 支持 body `betas` 自动转 `anthropic-beta`
+   - `tool_choice.type = any/tool` 时自动剥离 thinking
+   - 开启 thinking 且 `temperature != 1` 时自动归一为 `1`
+6. **门户版本信息同步**
+   - README 与门户右上角、登录页版本号已同步更新为 **v4.0**
 
 本次按当前代码修正了以下内容：
 

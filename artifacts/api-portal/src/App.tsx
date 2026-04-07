@@ -370,7 +370,7 @@ function LoginPage({ C, t, onLogin }: { C: Record<string, string>; t: TType; onL
         </Card>
         <div style={{ marginTop: 16, display: "flex", justifyContent: "center" }}>
           <div style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "6px 12px", borderRadius: 999, border: `1px solid ${C.purple}`, background: C.bgCard, color: C.textMuted, fontSize: 12, fontWeight: 600, boxShadow: `0 8px 24px ${C.shadow}` }}>
-            <span style={{ color: C.gradientB, fontFamily: "monospace", fontWeight: 700, letterSpacing: "0.06em" }}>v3.1</span>
+            <span style={{ color: C.gradientB, fontFamily: "monospace", fontWeight: 700, letterSpacing: "0.06em" }}>v4.0</span>
             <span>AI Proxy Portal</span>
           </div>
         </div>
@@ -833,7 +833,7 @@ export default function App() {
     return (
       <div>
         <div style={{ position: "absolute", top: 16, right: 16, display: "flex", alignItems: "center", gap: 10 }}>
-          <div style={{ fontSize: 11, fontWeight: 700, color: C.gradientB, background: C.purpleDark, border: `1px solid ${C.purple}`, borderRadius: 6, padding: "2px 7px", letterSpacing: "0.06em", fontFamily: "monospace" }}>v3.1</div>
+          <div style={{ fontSize: 11, fontWeight: 700, color: C.gradientB, background: C.purpleDark, border: `1px solid ${C.purple}`, borderRadius: 6, padding: "2px 7px", letterSpacing: "0.06em", fontFamily: "monospace" }}>v4.0</div>
           <LangToggle lang={lang} setLang={handleSetLang} C={C} />
         </div>
         <LoginPage C={C} t={t} onLogin={handleLogin} />
@@ -867,7 +867,7 @@ export default function App() {
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <div style={{ fontSize: 11, fontWeight: 700, color: C.gradientB, background: C.purpleDark, border: `1px solid ${C.purple}`, borderRadius: 6, padding: "2px 7px", letterSpacing: "0.06em", fontFamily: "monospace" }}>v3.1</div>
+          <div style={{ fontSize: 11, fontWeight: 700, color: C.gradientB, background: C.purpleDark, border: `1px solid ${C.purple}`, borderRadius: 6, padding: "2px 7px", letterSpacing: "0.06em", fontFamily: "monospace" }}>v4.0</div>
           <StatusDot online={online} C={C} t={t} />
           <LangToggle lang={lang} setLang={handleSetLang} C={C} />
           <button onClick={() => setDark((d) => !d)} style={{ background: C.bgInput, border: `1px solid ${C.border}`, borderRadius: 8, padding: "5px 10px", fontSize: 17, cursor: "pointer", color: C.text, lineHeight: 1 }}>{dark ? "☀️" : "🌙"}</button>

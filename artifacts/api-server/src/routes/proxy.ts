@@ -199,6 +199,44 @@ function resolveAnthropicUpstreamAuth(req: Request): ResolvedAnthropicUpstreamAu
   return { source: "missing", missing: true, usedEnvFallback: false };
 }
 
+function collectAnthropicBetaValues(req: Request, body?: Record<string, unknown>): string[] {
+  const values: string[] = [];
+  const pushValue = (value: unknown) => {
+    if (typeof value !== "string") return;
+    for (const item of value.split(",")) {
+      const normalized = item.trim();
+      if (normalized) values.push(normalized);
+    }
+  };
+
+  const betaHeader = req.headers["anthropic-beta"];
+  if (Array.isArray(betaHeader)) betaHeader.forEach(pushValue);
+  else pushValue(betaHeader);
+
+  const bodyBetas = body?.betas;
+  if (Array.isArray(bodyBetas)) bodyBetas.forEach(pushValue);
+  else pushValue(bodyBetas);
+
+  return [...new Set(values)];
+}
+
+function buildAnthropicRequestOptions(
+  req: Request,
+  body: Record<string, unknown> | undefined,
+  baseOptions?: Anthropic.RequestOptions,
+): Anthropic.RequestOptions | undefined {
+  const betas = collectAnthropicBetaValues(req, body);
+  if (betas.length === 0) return baseOptions;
+  const baseHeaders = (baseOptions?.headers ?? {}) as Record<string, string>;
+  return {
+    ...(baseOptions ?? {}),
+    headers: {
+      ...baseHeaders,
+      "anthropic-beta": betas.join(","),
+    },
+  };
+}
+
 function logAnthropicUpstreamAuth(req: Request, res: Response, meta: { model: string; feature: "messages" | "count_tokens"; auth: ResolvedAnthropicUpstreamAuth }) {
   const logMeta = {
     model: meta.model,
@@ -259,6 +297,50 @@ function sendAnthropicAuthUnavailable(res: Response) {
 
 function sendOpenAIInvalidRequest(res: Response, message: string, status = 400) {
   res.status(status).json({ error: { message, type: "invalid_request_error", code: status } });
+}
+
+function stripAnthropicOutputConfigEffort(outputConfig: Anthropic.OutputConfig | undefined): Anthropic.OutputConfig | undefined {
+  if (!isPlainObject(outputConfig)) return outputConfig;
+  const nextOutputConfig = { ...outputConfig } as Record<string, unknown>;
+  delete nextOutputConfig.effort;
+  return Object.keys(nextOutputConfig).length > 0 ? nextOutputConfig as Anthropic.OutputConfig : undefined;
+}
+
+function isAnthropicThinkingEnabled(thinking: Anthropic.MessageCreateParamsNonStreaming["thinking"] | undefined): boolean {
+  return Boolean(thinking && thinking.type !== "disabled");
+}
+
+function hasForcedAnthropicToolChoice(toolChoice: Anthropic.MessageCreateParams["tool_choice"] | undefined): boolean {
+  return toolChoice?.type === "any" || toolChoice?.type === "tool";
+}
+
+function normalizeAnthropicCompatibility(args: {
+  toolChoice?: Anthropic.MessageCreateParams["tool_choice"];
+  thinking?: Anthropic.MessageCreateParamsNonStreaming["thinking"];
+  outputConfig?: Anthropic.OutputConfig;
+  temperature?: number;
+}): {
+  toolChoice?: Anthropic.MessageCreateParams["tool_choice"];
+  thinking?: Anthropic.MessageCreateParamsNonStreaming["thinking"];
+  outputConfig?: Anthropic.OutputConfig;
+  temperature?: number;
+  adjustments: Array<"thinking_removed_for_forced_tool_choice" | "temperature_set_to_1_for_thinking">;
+} {
+  let { toolChoice, thinking, outputConfig, temperature } = args;
+  const adjustments: Array<"thinking_removed_for_forced_tool_choice" | "temperature_set_to_1_for_thinking"> = [];
+
+  if (hasForcedAnthropicToolChoice(toolChoice) && isAnthropicThinkingEnabled(thinking)) {
+    thinking = undefined;
+    outputConfig = stripAnthropicOutputConfigEffort(outputConfig);
+    adjustments.push("thinking_removed_for_forced_tool_choice");
+  }
+
+  if (isAnthropicThinkingEnabled(thinking) && temperature !== undefined && temperature !== 1) {
+    temperature = 1;
+    adjustments.push("temperature_set_to_1_for_thinking");
+  }
+
+  return { toolChoice, thinking, outputConfig, temperature, adjustments };
 }
 
 function isValidAnthropicContentBlock(block: unknown): boolean {
@@ -990,6 +1072,13 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
       req.log.info({ model, provider: "anthropic", samplingAdjustments: sampling.adjustments }, "Anthropic sampling normalized");
     }
 
+    const anthropicUpstreamAuth = resolveAnthropicUpstreamAuth(req);
+    logAnthropicUpstreamAuth(req, res, { model, feature: "messages", auth: anthropicUpstreamAuth });
+    if (anthropicUpstreamAuth.missing) {
+      sendAnthropicAuthUnavailable(res);
+      return;
+    }
+
     const anthropic = getAnthropicClient();
     const { system, messages } = convertMessagesToAnthropic(rawMessages);
     // Fix B: when tool_choice is "none", strip both tools and tool_choice
@@ -1014,6 +1103,17 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
         })
       : {};
 
+    const convertedToolChoice = effectiveToolChoice ? convertToolChoiceToAnthropic(effectiveToolChoice) : undefined;
+    const anthropicCompat = normalizeAnthropicCompatibility({
+      toolChoice: convertedToolChoice,
+      thinking: anthropicThinking.thinking,
+      outputConfig: anthropicThinking.outputConfig,
+      temperature: sampling.temperature,
+    });
+    if (anthropicCompat.adjustments.length > 0) {
+      req.log.info({ model, provider: "anthropic", compatibilityAdjustments: anthropicCompat.adjustments }, "Anthropic compatibility normalized");
+    }
+
     const anthropicParams: Anthropic.MessageCreateParamsNonStreaming = {
       model,
       max_tokens: maxTokens ?? 8192,
@@ -1021,16 +1121,18 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
     };
     if (sanitizedAnthropic.system) anthropicParams.system = sanitizedAnthropic.system;
     if (sanitizedAnthropic.tools) anthropicParams.tools = sanitizedAnthropic.tools;
-    if (effectiveToolChoice) anthropicParams.tool_choice = convertToolChoiceToAnthropic(effectiveToolChoice);
-    if (sampling.temperature !== undefined) anthropicParams.temperature = sampling.temperature;
-    if (anthropicThinking.thinking) anthropicParams.thinking = anthropicThinking.thinking;
-    if (anthropicThinking.outputConfig) anthropicParams.output_config = anthropicThinking.outputConfig;
+    if (anthropicCompat.toolChoice) anthropicParams.tool_choice = anthropicCompat.toolChoice;
+    if (anthropicCompat.temperature !== undefined) anthropicParams.temperature = anthropicCompat.temperature;
+    if (anthropicCompat.thinking) anthropicParams.thinking = anthropicCompat.thinking;
+    if (anthropicCompat.outputConfig) anthropicParams.output_config = anthropicCompat.outputConfig;
     // Fix 7: forward top_p and stop sequences where Anthropic supports them
     if (sampling.topP !== undefined) (anthropicParams as unknown as Record<string, unknown>).top_p = sampling.topP;
     if (stop != null) {
       const stopArr = Array.isArray(stop) ? stop : [stop];
       if (stopArr.length > 0) (anthropicParams as unknown as Record<string, unknown>).stop_sequences = stopArr;
     }
+
+    const anthropicRequestOptions = buildAnthropicRequestOptions(req, body, anthropicUpstreamAuth.requestOptions);
 
     const startTs = Date.now();
 
@@ -1048,7 +1150,7 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
       let streamOutputTokens = 0;
 
       try {
-        const anthropicStream = anthropic.messages.stream(anthropicParams);
+        const anthropicStream = anthropic.messages.stream(anthropicParams, anthropicRequestOptions);
 
         for await (const event of anthropicStream) {
           if (event.type === "message_start") {
@@ -1199,7 +1301,7 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
     // Non-streaming
     try {
       const finalMsg = await withRetry(() =>
-        anthropic.messages.stream(anthropicParams).finalMessage()
+        anthropic.messages.stream(anthropicParams, anthropicRequestOptions).finalMessage()
       );
       req.log.info({
         model,
@@ -1510,7 +1612,16 @@ router.post("/messages/count_tokens", requireAuth, async (req: Request, res: Res
     resolution: thinkingResolution,
     maxTokens: 200_000,
     existingOutputConfig: body.output_config,
+    allowOutputConfig: false,
   });
+  const anthropicCompat = normalizeAnthropicCompatibility({
+    toolChoice: body.tool_choice,
+    thinking: anthropicThinking.thinking,
+    outputConfig: anthropicThinking.outputConfig,
+  });
+  if (anthropicCompat.adjustments.length > 0) {
+    req.log.info({ model, provider: "anthropic", compatibilityAdjustments: anthropicCompat.adjustments, feature: "count_tokens" }, "Anthropic compatibility normalized");
+  }
 
   const countParams: Anthropic.MessageCountTokensParams = {
     model,
@@ -1518,11 +1629,13 @@ router.post("/messages/count_tokens", requireAuth, async (req: Request, res: Res
   };
   if (sanitizedAnthropic.system) countParams.system = sanitizedAnthropic.system;
   if (sanitizedAnthropic.tools) countParams.tools = sanitizedAnthropic.tools;
-  if (anthropicThinking.thinking) countParams.thinking = anthropicThinking.thinking;
-  if (anthropicThinking.outputConfig) countParams.output_config = anthropicThinking.outputConfig;
+  if (anthropicCompat.toolChoice) countParams.tool_choice = anthropicCompat.toolChoice;
+  if (anthropicCompat.thinking) countParams.thinking = anthropicCompat.thinking;
+
+  const anthropicRequestOptions = buildAnthropicRequestOptions(req, body as unknown as Record<string, unknown>, anthropicUpstreamAuth.requestOptions);
 
   try {
-    const result = await withRetry(() => anthropic.messages.countTokens(countParams, anthropicUpstreamAuth.requestOptions));
+    const result = await withRetry(() => anthropic.messages.countTokens(countParams, anthropicRequestOptions));
     res.json(result);
   } catch (err: unknown) {
     const e = err as { status?: number; message?: string };
@@ -1594,6 +1707,15 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
           existingOutputConfig: body.output_config,
         })
       : {};
+    const anthropicCompat = normalizeAnthropicCompatibility({
+      toolChoice: body.tool_choice,
+      thinking: anthropicThinking.thinking,
+      outputConfig: anthropicThinking.outputConfig,
+      temperature: sampling.temperature,
+    });
+    if (anthropicCompat.adjustments.length > 0) {
+      req.log.info({ model, provider: "anthropic", compatibilityAdjustments: anthropicCompat.adjustments }, "Anthropic compatibility normalized");
+    }
 
     const anthropicParams: Anthropic.MessageCreateParamsNonStreaming = {
       model,
@@ -1602,12 +1724,14 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
     };
     if (sanitizedAnthropic.system) anthropicParams.system = sanitizedAnthropic.system;
     if (sanitizedAnthropic.tools) anthropicParams.tools = sanitizedAnthropic.tools;
-    if (body.tool_choice) anthropicParams.tool_choice = body.tool_choice;
-    if (sampling.temperature !== undefined) anthropicParams.temperature = sampling.temperature;
+    if (anthropicCompat.toolChoice) anthropicParams.tool_choice = anthropicCompat.toolChoice;
+    if (anthropicCompat.temperature !== undefined) anthropicParams.temperature = anthropicCompat.temperature;
     if (sampling.topP !== undefined) (anthropicParams as any).top_p = sampling.topP;
-    if (anthropicThinking.thinking) anthropicParams.thinking = anthropicThinking.thinking;
-    if (anthropicThinking.outputConfig) anthropicParams.output_config = anthropicThinking.outputConfig;
+    if (anthropicCompat.thinking) anthropicParams.thinking = anthropicCompat.thinking;
+    if (anthropicCompat.outputConfig) anthropicParams.output_config = anthropicCompat.outputConfig;
     if ((body as any).stop_sequences) (anthropicParams as any).stop_sequences = (body as any).stop_sequences;
+
+    const anthropicRequestOptions = buildAnthropicRequestOptions(req, body as unknown as Record<string, unknown>, anthropicUpstreamAuth.requestOptions);
 
     if (stream) {
       const keepalive = setupSseHeaders(req, res, () => {
@@ -1617,7 +1741,7 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
       req.on("close", () => clearInterval(keepalive));
 
       try {
-        const anthropicStream = anthropic.messages.stream(anthropicParams, anthropicUpstreamAuth.requestOptions);
+        const anthropicStream = anthropic.messages.stream(anthropicParams, anthropicRequestOptions);
         for await (const event of anthropicStream) {
           res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
           (res as any).flush?.();
@@ -1637,7 +1761,7 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
 
     try {
       const finalMsg = await withRetry(() =>
-        anthropic.messages.stream(anthropicParams, anthropicUpstreamAuth.requestOptions).finalMessage()
+        anthropic.messages.stream(anthropicParams, anthropicRequestOptions).finalMessage()
       );
       res.json(finalMsg);
     } catch (err: unknown) {

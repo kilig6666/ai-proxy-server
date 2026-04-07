@@ -387,18 +387,21 @@ export function buildAnthropicThinkingPayload(args: {
   resolution: ThinkingResolution;
   maxTokens: number;
   existingOutputConfig?: Anthropic.MessageCreateParamsNonStreaming["output_config"] | null;
+  allowOutputConfig?: boolean;
 }): {
   thinking?: Anthropic.MessageCreateParamsNonStreaming["thinking"];
   outputConfig?: Anthropic.MessageCreateParamsNonStreaming["output_config"];
 } {
   const { resolution, maxTokens } = args;
+  const allowOutputConfig = args.allowOutputConfig ?? true;
   const existingOutputConfig = args.existingOutputConfig ?? undefined;
+  const supportsAdaptive = resolution.capability?.mode === "hybrid";
 
   if (!resolution.hadRequestConfig) {
-    return existingOutputConfig ? { outputConfig: existingOutputConfig } : {};
+    return allowOutputConfig && existingOutputConfig ? { outputConfig: existingOutputConfig } : {};
   }
 
-  const nextOutputConfig = isRecord(existingOutputConfig) ? { ...existingOutputConfig } : undefined;
+  const nextOutputConfig = allowOutputConfig && isRecord(existingOutputConfig) ? { ...existingOutputConfig } : undefined;
   delete nextOutputConfig?.effort;
 
   if (resolution.stripped || !resolution.config) {
@@ -416,19 +419,21 @@ export function buildAnthropicThinkingPayload(args: {
   }
 
   if (config.mode === "auto") {
-    return {
-      thinking: display ? { type: "adaptive", display } : { type: "adaptive" },
-      outputConfig: nextOutputConfig && Object.keys(nextOutputConfig).length > 0 ? nextOutputConfig as Anthropic.OutputConfig : undefined,
-    };
+    if (supportsAdaptive) {
+      return {
+        thinking: display ? { type: "adaptive", display } : { type: "adaptive" },
+        outputConfig: nextOutputConfig && Object.keys(nextOutputConfig).length > 0 ? nextOutputConfig as Anthropic.OutputConfig : undefined,
+      };
+    }
   }
 
-  if (config.mode === "effort") {
+  if (config.mode === "effort" && supportsAdaptive) {
     const effort = mapToClaudeEffort(config.effort, resolution.capability?.supportsMax);
     if (effort) {
       const outputConfig: Anthropic.OutputConfig = { ...(nextOutputConfig ?? {}), effort };
       return {
         thinking: display ? { type: "adaptive", display } : { type: "adaptive" },
-        outputConfig,
+        outputConfig: allowOutputConfig ? outputConfig : undefined,
       };
     }
   }
