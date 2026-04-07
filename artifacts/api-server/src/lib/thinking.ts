@@ -60,6 +60,7 @@ const LEVEL_TO_BUDGET: Record<ThinkingEffort | "auto", number> = {
 const GEMINI_3_PREFIXES = ["gemini-3", "gemini-3."];
 const ANTHROPIC_EFFORTS = new Set<ThinkingEffort>(["low", "medium", "high", "max"]);
 const OPENAI_EFFORTS = new Set<ThinkingEffort>(["none", "minimal", "low", "medium", "high", "xhigh"]);
+const ANTHROPIC_MIN_BUDGET_TOKENS = 1024;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -99,6 +100,14 @@ function convertBudgetToEffort(budget: number): ThinkingEffort | undefined {
 
 function convertEffortToBudget(effort: ThinkingEffort | "auto"): number {
   return LEVEL_TO_BUDGET[effort];
+}
+
+function normalizeAnthropicBudgetTokens(requestedBudget: number, maxTokens: number): number | undefined {
+  const upperBound = maxTokens - 1;
+  if (!Number.isFinite(upperBound) || upperBound < ANTHROPIC_MIN_BUDGET_TOKENS) {
+    return undefined;
+  }
+  return Math.max(ANTHROPIC_MIN_BUDGET_TOKENS, Math.min(requestedBudget, upperBound));
 }
 
 function mapToClaudeEffort(effort: ThinkingEffort | undefined, supportsMax = false): Anthropic.OutputConfig["effort"] | undefined {
@@ -427,8 +436,14 @@ export function buildAnthropicThinkingPayload(args: {
   const requestedBudget = config.mode === "budget"
     ? (config.budget ?? 0)
     : convertEffortToBudget(config.effort ?? "high");
-  const upperBound = Math.max(1024, maxTokens - 1);
-  const budgetTokens = Math.max(1024, Math.min(requestedBudget, upperBound));
+  const budgetTokens = normalizeAnthropicBudgetTokens(requestedBudget, maxTokens);
+
+  if (budgetTokens === undefined) {
+    return {
+      thinking: { type: "disabled" },
+      outputConfig: nextOutputConfig && Object.keys(nextOutputConfig).length > 0 ? nextOutputConfig as Anthropic.OutputConfig : undefined,
+    };
+  }
 
   return {
     thinking: display
