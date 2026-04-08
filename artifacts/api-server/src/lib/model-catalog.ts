@@ -16,7 +16,7 @@ export interface VisionCapability {
 export interface ProxyModelDefinition {
   id: string;
   provider: ProviderId;
-  ownedBy: "openai" | "anthropic" | "google";
+  ownedBy: "openai" | "anthropic" | "gemini";
   routes: string[];
   thinking: ThinkingCapability;
   vision: VisionCapability;
@@ -54,11 +54,11 @@ export const PROXY_MODEL_CATALOG: ProxyModelDefinition[] = [
   { id: "claude-sonnet-4-6", provider: "anthropic", ownedBy: "anthropic", routes: ["/v1/chat/completions", "/v1/messages"], thinking: CLAUDE_ADAPTIVE_THINKING, vision: WITH_VISION },
   { id: "claude-sonnet-4-5", provider: "anthropic", ownedBy: "anthropic", routes: ["/v1/chat/completions", "/v1/messages"], thinking: CLAUDE_BUDGET_THINKING, vision: WITH_VISION },
   { id: "claude-haiku-4-5", provider: "anthropic", ownedBy: "anthropic", routes: ["/v1/chat/completions", "/v1/messages"], thinking: NO_THINKING, vision: WITH_VISION },
-  { id: "gemini-3.1-pro-preview", provider: "gemini", ownedBy: "google", routes: ["/v1/chat/completions", "/v1/messages"], thinking: GEMINI_THINKING, vision: WITH_VISION },
-  { id: "gemini-3-pro-preview", provider: "gemini", ownedBy: "google", routes: ["/v1/chat/completions", "/v1/messages"], thinking: GEMINI_THINKING, vision: WITH_VISION },
-  { id: "gemini-3-flash-preview", provider: "gemini", ownedBy: "google", routes: ["/v1/chat/completions", "/v1/messages"], thinking: GEMINI_THINKING, vision: WITH_VISION },
-  { id: "gemini-2.5-pro", provider: "gemini", ownedBy: "google", routes: ["/v1/chat/completions", "/v1/messages"], thinking: GEMINI_THINKING, vision: WITH_VISION },
-  { id: "gemini-2.5-flash", provider: "gemini", ownedBy: "google", routes: ["/v1/chat/completions", "/v1/messages"], thinking: GEMINI_THINKING, vision: WITH_VISION },
+  { id: "gemini-3.1-pro-preview", provider: "gemini", ownedBy: "gemini", routes: ["/v1/chat/completions", "/v1/messages"], thinking: GEMINI_THINKING, vision: WITH_VISION },
+  { id: "gemini-3-pro-preview", provider: "gemini", ownedBy: "gemini", routes: ["/v1/chat/completions", "/v1/messages"], thinking: GEMINI_THINKING, vision: WITH_VISION },
+  { id: "gemini-3-flash-preview", provider: "gemini", ownedBy: "gemini", routes: ["/v1/chat/completions", "/v1/messages"], thinking: GEMINI_THINKING, vision: WITH_VISION },
+  { id: "gemini-2.5-pro", provider: "gemini", ownedBy: "gemini", routes: ["/v1/chat/completions", "/v1/messages"], thinking: GEMINI_THINKING, vision: WITH_VISION },
+  { id: "gemini-2.5-flash", provider: "gemini", ownedBy: "gemini", routes: ["/v1/chat/completions", "/v1/messages"], thinking: GEMINI_THINKING, vision: WITH_VISION },
 ];
 
 function normalizeCatalogModelId(model: string): string {
