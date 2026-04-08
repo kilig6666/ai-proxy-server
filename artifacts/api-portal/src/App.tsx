@@ -294,6 +294,8 @@ const GEMINI_MODELS: ModelMeta[] = [
   { id: "gemini-3-flash-preview",                       ctx: "1M",  caps: ["stream","tools","vision","reasoning"],        route: "/v1/chat/completions · /v1/messages" },
   { id: "gemini-2.5-pro",   note: "Most capable",      ctx: "2M",  caps: ["stream","tools","vision","json","reasoning"], route: "/v1/chat/completions · /v1/messages" },
   { id: "gemini-2.5-flash", note: "Recommended",       ctx: "1M",  caps: ["stream","tools","vision","json","reasoning"], route: "/v1/chat/completions · /v1/messages" },
+  // ── Image generation (direct Gemini API) ────────────────────────────────────
+  { id: "gemini-2.0-flash-preview-image-generation", note: "Image Gen", ctx: "—", caps: ["image","vision"], route: "/v1/chat/completions" },
 ];
 const OPENROUTER_MODELS: ModelMeta[] = [
   { id: "meta-llama/llama-4-maverick", note: "Recommended", ctx: "1M",   caps: ["stream","tools","vision","json"], route: "/v1/chat/completions" },
@@ -312,9 +314,7 @@ const OPENROUTER_MODELS: ModelMeta[] = [
   { id: "microsoft/phi-4",                                ctx: "16K",  caps: ["stream","tools","json"],            route: "/v1/chat/completions" },
   { id: "microsoft/phi-4-multimodal-instruct",            ctx: "128K", caps: ["stream","tools","vision","json"],  route: "/v1/chat/completions" },
   { id: "nvidia/llama-3.1-nemotron-70b-instruct",         ctx: "128K", caps: ["stream","tools","json"],           route: "/v1/chat/completions" },
-  // ── Image generation ───────────────────────────────────────────────────────
-  { id: "google/gemini-3.1-flash-image-preview", note: "Image Gen", ctx: "—", caps: ["image","vision"], route: "/v1/chat/completions" },
-  { id: "google/gemini-3-pro-image-preview",     note: "Image Gen", ctx: "—", caps: ["image","vision"], route: "/v1/chat/completions" },
+  // ── Image generation (via OpenRouter) ──────────────────────────────────────
   { id: "google/gemini-2.0-flash-exp:image-generation", note: "Image Gen", ctx: "—", caps: ["image","vision"], route: "/v1/chat/completions" },
   { id: "openai/gpt-image-1",            note: "Image Gen", ctx: "—", caps: ["image","vision"], route: "/v1/chat/completions" },
   { id: "black-forest-labs/flux-1.1-pro", note: "Image Gen", ctx: "—", caps: ["image"], route: "/v1/chat/completions" },

@@ -1601,6 +1601,9 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
     }
     const geminiThinking = thinkingResolution ? buildGeminiThinkingConfig(thinkingResolution) : undefined;
     if (geminiThinking) generationConfig.thinkingConfig = geminiThinking;
+    // Enable image output for image-generation models
+    const isGeminiImageGen = /image/i.test(model);
+    if (isGeminiImageGen) generationConfig.responseModalities = ["TEXT", "IMAGE"];
 
     const geminiConfig: Record<string, unknown> = { generationConfig };
     if (systemInstruction) geminiConfig.systemInstruction = systemInstruction;
@@ -1664,6 +1667,17 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
                 choices: [{ index: 0, delta: { content: part.text }, finish_reason: null, logprobs: null }],
               };
               res.write(`data: ${JSON.stringify(textChunk)}\n\n`);
+              (res as any).flush?.();
+            } else if (part.inlineData) {
+              const dataUrl = `data:${part.inlineData.mimeType ?? "image/png"};base64,${part.inlineData.data}`;
+              const imageChunk: OpenAI.ChatCompletionChunk = {
+                id: msgId,
+                object: "chat.completion.chunk",
+                created: Math.floor(Date.now() / 1000),
+                model,
+                choices: [{ index: 0, delta: { content: `\n[IMAGE:${dataUrl}]` }, finish_reason: null, logprobs: null }],
+              };
+              res.write(`data: ${JSON.stringify(imageChunk)}\n\n`);
               (res as any).flush?.();
             } else if (part.functionCall) {
               currentToolIndex++;
@@ -1762,11 +1776,15 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
       const toolCalls: OpenAI.ChatCompletionMessageToolCall[] = [];
       let textContent = "";
       const reasoningTexts: string[] = [];
+      const inlineImageUrls: string[] = [];
       for (const part of parts) {
         if (part.text && part.thought) {
           reasoningTexts.push(part.text);
         } else if (part.text) {
           textContent += part.text;
+        } else if (part.inlineData) {
+          const dataUrl = `data:${part.inlineData.mimeType ?? "image/png"};base64,${part.inlineData.data}`;
+          inlineImageUrls.push(dataUrl);
         } else if (part.functionCall) {
           toolCalls.push({
             id: `call_${Date.now()}_${toolCalls.length}`,
@@ -1780,9 +1798,23 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
       }
 
       const finishReason = toolCalls.length > 0 ? "tool_calls" : mapGeminiFinishReason(candidate?.finishReason);
+
+      // Build content: if images returned, use content array
+      let messageContent: string | OpenAI.ChatCompletionContentPart[] | null;
+      if (inlineImageUrls.length > 0) {
+        const contentParts: OpenAI.ChatCompletionContentPart[] = [];
+        if (textContent) contentParts.push({ type: "text", text: textContent });
+        for (const url of inlineImageUrls) {
+          contentParts.push({ type: "image_url", image_url: { url } });
+        }
+        messageContent = contentParts;
+      } else {
+        messageContent = textContent || null;
+      }
+
       const message: OpenAI.ChatCompletionMessage = {
         role: "assistant",
-        content: textContent || null,
+        content: messageContent as string | null,
         refusal: null,
       };
       if (toolCalls.length > 0) message.tool_calls = toolCalls;
