@@ -732,6 +732,7 @@ function ModelsTab({ C, t, onGoChat, adminToken }: { C: Record<string, string>; 
   const [syncError, setSyncError] = useState("");
   const [search, setSearch] = useState("");
   const [activeView, setActiveView] = useState<"static" | "live">("static");
+  const [filterProvider, setFilterProvider] = useState<string | null>(null);
 
   const handleSync = async () => {
     setSyncing(true);
@@ -753,11 +754,17 @@ function ModelsTab({ C, t, onGoChat, adminToken }: { C: Record<string, string>; 
   };
 
   const allLiveModels: SyncedModelEntry[] = syncData?.results.flatMap((r) => r.models) ?? [];
-  const filteredLive = search.trim()
-    ? allLiveModels.filter((m) => m.id.toLowerCase().includes(search.toLowerCase()) || (m.name ?? "").toLowerCase().includes(search.toLowerCase()))
+  const allLiveFiltered = filterProvider
+    ? allLiveModels.filter((m) => m.provider === filterProvider)
     : allLiveModels;
+  const filteredLive = search.trim()
+    ? allLiveFiltered.filter((m) => m.id.toLowerCase().includes(search.toLowerCase()) || (m.name ?? "").toLowerCase().includes(search.toLowerCase()))
+    : allLiveFiltered;
 
   const liveByProvider = syncData?.results ?? [];
+  const visibleLiveByProvider = filterProvider
+    ? liveByProvider.filter((r) => r.provider === filterProvider)
+    : liveByProvider;
 
   const orBySubprovider: Record<string, SyncedModelEntry[]> = {};
   const orResult = liveByProvider.find((r) => r.provider === "openrouter");
@@ -787,7 +794,7 @@ function ModelsTab({ C, t, onGoChat, adminToken }: { C: Record<string, string>; 
           <>
             <div style={{ display: "flex", gap: 4 }}>
               {(["static", "live"] as const).map((v) => (
-                <button key={v} onClick={() => setActiveView(v)} style={{
+                <button key={v} onClick={() => { setActiveView(v); setFilterProvider(null); }} style={{
                   background: activeView === v ? C.bgInput : "transparent",
                   border: `1px solid ${activeView === v ? C.border : "transparent"}`,
                   borderRadius: 6, padding: "4px 12px", fontSize: 12, fontWeight: 600,
@@ -810,20 +817,28 @@ function ModelsTab({ C, t, onGoChat, adminToken }: { C: Record<string, string>; 
         <div>
           <div style={{ display: "flex", gap: 12, marginBottom: 28, flexWrap: "wrap" }}>
             {[
-              { label: "精选合计",    value: `${ALL_MODELS.length}`,            color: C.text },
-              { label: "OpenAI",      value: `${OPENAI_MODELS.length}`,          color: C.blue },
-              { label: "Anthropic",   value: `${ANTHROPIC_MODELS.length}`,       color: C.orange },
-              { label: "Gemini",      value: `${GEMINI_MODELS.length}`,          color: C.emerald },
-              { label: "OpenRouter",  value: `${OPENROUTER_MODELS.length}`,      color: C.purple },
-            ].map((s) => (
-              <div key={s.label} style={{ background: C.bgCard, border: `1px solid ${C.border}`, borderRadius: 10, padding: "12px 20px", display: "flex", flexDirection: "column", gap: 4, minWidth: 90 }}>
-                <div style={{ fontSize: 22, fontWeight: 800, color: s.color, fontFamily: "monospace" }}>{s.value}</div>
-                <div style={{ fontSize: 12, color: C.textMuted, fontWeight: 600 }}>{s.label}</div>
-              </div>
-            ))}
+              { label: "精选合计", value: ALL_MODELS.length, color: C.text, key: null },
+              { label: "OpenAI",   value: OPENAI_MODELS.length,    color: C.blue,    key: "openai" },
+              { label: "Anthropic",value: ANTHROPIC_MODELS.length, color: C.orange,  key: "anthropic" },
+              { label: "Gemini",   value: GEMINI_MODELS.length,    color: C.emerald, key: "gemini" },
+              { label: "OpenRouter",value: OPENROUTER_MODELS.length,color: C.purple, key: "openrouter" },
+            ].map((s) => {
+              const isActive = filterProvider === s.key;
+              return (
+                <div key={s.label}
+                  onClick={() => setFilterProvider(isActive ? null : s.key)}
+                  style={{ background: isActive ? `${s.color}15` : C.bgCard, border: `2px solid ${isActive ? s.color : C.border}`, borderRadius: 10, padding: "12px 20px", display: "flex", flexDirection: "column", gap: 4, minWidth: 90, cursor: s.key ? "pointer" : "default", transition: "all 0.15s" }}
+                  onMouseEnter={(e) => { if (s.key) e.currentTarget.style.borderColor = s.color; }}
+                  onMouseLeave={(e) => { if (!isActive && s.key) e.currentTarget.style.borderColor = C.border; }}
+                >
+                  <div style={{ fontSize: 22, fontWeight: 800, color: s.color, fontFamily: "monospace" }}>{s.value}</div>
+                  <div style={{ fontSize: 12, color: isActive ? s.color : C.textMuted, fontWeight: 600 }}>{s.label}</div>
+                </div>
+              );
+            })}
           </div>
 
-          {staticGroups.map(({ provider, color, bg, models }) => (
+          {(filterProvider ? staticGroups.filter((g) => g.provider.toLowerCase() === filterProvider) : staticGroups).map(({ provider, color, bg, models }) => (
             <div key={provider} style={{ marginBottom: 32 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
                 <div style={{ width: 4, height: 22, borderRadius: 2, background: color, flexShrink: 0 }} />
@@ -868,18 +883,27 @@ function ModelsTab({ C, t, onGoChat, adminToken }: { C: Record<string, string>; 
         <div>
           {/* Live stats */}
           <div style={{ display: "flex", gap: 12, marginBottom: 20, flexWrap: "wrap" }}>
-            <div style={{ background: C.bgCard, border: `1px solid ${C.border}`, borderRadius: 10, padding: "12px 20px", display: "flex", flexDirection: "column", gap: 4, minWidth: 90 }}>
+            <div
+              onClick={() => setFilterProvider(null)}
+              style={{ background: filterProvider === null ? `${C.text}10` : C.bgCard, border: `2px solid ${filterProvider === null ? C.text : C.border}`, borderRadius: 10, padding: "12px 20px", display: "flex", flexDirection: "column", gap: 4, minWidth: 90, cursor: "pointer", transition: "all 0.15s" }}
+            >
               <div style={{ fontSize: 22, fontWeight: 800, color: C.text, fontFamily: "monospace" }}>{allLiveModels.length}</div>
-              <div style={{ fontSize: 12, color: C.textMuted, fontWeight: 600 }}>合计</div>
+              <div style={{ fontSize: 12, color: filterProvider === null ? C.text : C.textMuted, fontWeight: 600 }}>合计</div>
             </div>
             {liveByProvider.map((r) => {
               const color = providerColorOf(C, r.provider);
               const label = r.provider.charAt(0).toUpperCase() + r.provider.slice(1);
               const isLive = r.source === "live";
+              const isActive = filterProvider === r.provider;
               return (
-                <div key={r.provider} style={{ background: C.bgCard, border: `1px solid ${C.border}`, borderRadius: 10, padding: "12px 20px", display: "flex", flexDirection: "column", gap: 4, minWidth: 90 }}>
+                <div key={r.provider}
+                  onClick={() => setFilterProvider(isActive ? null : r.provider)}
+                  onMouseEnter={(e) => { e.currentTarget.style.borderColor = color; }}
+                  onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.borderColor = C.border; }}
+                  style={{ background: isActive ? `${color}15` : C.bgCard, border: `2px solid ${isActive ? color : C.border}`, borderRadius: 10, padding: "12px 20px", display: "flex", flexDirection: "column", gap: 4, minWidth: 90, cursor: "pointer", transition: "all 0.15s" }}
+                >
                   <div style={{ fontSize: 22, fontWeight: 800, color, fontFamily: "monospace" }}>{r.count}</div>
-                  <div style={{ fontSize: 12, color: C.textMuted, fontWeight: 600, display: "flex", alignItems: "center", gap: 4 }}>
+                  <div style={{ fontSize: 12, color: isActive ? color : C.textMuted, fontWeight: 600, display: "flex", alignItems: "center", gap: 4 }}>
                     {label}
                     <span style={{ fontSize: 10, fontWeight: 700, padding: "1px 5px", borderRadius: 3, background: isLive ? `${C.emerald}20` : C.bgInput, color: isLive ? C.emerald : C.textDim, border: `1px solid ${isLive ? C.emerald : C.border}40` }}>
                       {isLive ? "live" : "static"}
@@ -920,7 +944,7 @@ function ModelsTab({ C, t, onGoChat, adminToken }: { C: Record<string, string>; 
           ) : (
             /* Grouped by provider */
             <div>
-              {liveByProvider.map((result) => {
+              {visibleLiveByProvider.map((result) => {
                 const color = providerColorOf(C, result.provider);
                 const bg = providerBgOf(C, result.provider);
                 const label = result.provider.charAt(0).toUpperCase() + result.provider.slice(1);
