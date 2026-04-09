@@ -1,6 +1,6 @@
 # AI Proxy Server
 
-> **by kilig** — v5.0
+> **by kilig** — v5.2
 
 一个面向 OpenAI / Anthropic / Gemini 的统一 AI 代理服务。
 
