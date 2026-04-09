@@ -1856,7 +1856,7 @@ router.post("/chat/completions", requireAuth, async (req: Request, res: Response
   // ─── OpenRouter (OpenAI-compatible, any model with "/" in name) ───────────
   if (isOpenRouterModel(model)) {
     const client = getOpenRouterClient();
-    const { temperature, topP, frequencyPenalty, presencePenalty } = normalizeSamplingParams(samplingInput, "openai");
+    const { temperature, topP, frequencyPenalty, presencePenalty } = normalizeSamplingParams("openai", samplingInput);
     const orStartTs = Date.now();
     try {
       if (stream) {

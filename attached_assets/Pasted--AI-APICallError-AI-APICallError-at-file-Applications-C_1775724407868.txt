@@ -1,0 +1,64 @@
+错误名称: AI_APICallError
+错误信息: 
+堆栈信息: AI_APICallError
+    at file:///Applications/Cherry%20Studio.app/Contents/Resources/app.asar/out/renderer/assets/dist-CUjkTMRK.js:2096:11
+    at async postToApi (file:///Applications/Cherry%20Studio.app/Contents/Resources/app.asar/out/renderer/assets/dist-CUjkTMRK.js:1977:24)
+    at async AnthropicMessagesLanguageModel.doStream (file:///Applications/Cherry%20Studio.app/Contents/Resources/app.asar/out/renderer/assets/dist-BL0W2lvA.js:2622:48)
+    at async fn (file:///Applications/Cherry%20Studio.app/Contents/Resources/app.asar/out/renderer/assets/store-BDFHZEb3.js:47480:17)
+    at async file:///Applications/Cherry%20Studio.app/Contents/Resources/app.asar/out/renderer/assets/store-BDFHZEb3.js:43834:19
+    at async _retryWithExponentialBackoff (file:///Applications/Cherry%20Studio.app/Contents/Resources/app.asar/out/renderer/assets/store-BDFHZEb3.js:43997:10)
+    at async streamStep (file:///Applications/Cherry%20Studio.app/Contents/Resources/app.asar/out/renderer/assets/store-BDFHZEb3.js:47449:109)
+    at async fn (file:///Applications/Cherry%20Studio.app/Contents/Resources/app.asar/out/renderer/assets/store-BDFHZEb3.js:47755:5)
+    at async file:///Applications/Cherry%20Studio.app/Contents/Resources/app.asar/out/renderer/assets/store-BDFHZEb3.js:43834:19
+错误原因: "[undefined]"
+状态码: 500
+请求路径: https://zip-deploy-woodlyhamoud157.replit.app/v1/messages
+请求体: {
+  "model": "deepseek/deepseek-r1-0528",
+  "max_tokens": 4096,
+  "temperature": "[undefined]",
+  "top_k": "[undefined]",
+  "top_p": "[undefined]",
+  "stop_sequences": "[undefined]",
+  "system": "[undefined]",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "nihao",
+          "cache_control": "[undefined]"
+        }
+      ]
+    }
+  ],
+  "tools": "[undefined]",
+  "tool_choice": "[undefined]",
+  "stream": true
+}
+响应首部: {
+  "access-control-allow-origin": "*",
+  "alt-svc": "h3=\":443\"; ma=2592000",
+  "content-length": "148",
+  "content-type": "text/html; charset=utf-8",
+  "date": "Thu, 09 Apr 2026 08:46:19 GMT",
+  "server": "Google Frontend",
+  "strict-transport-security": "max-age=63072000; includeSubDomains",
+  "via": "1.1 google",
+  "x-cloud-trace-context": "1b2dfa649c1d79a4e11c8f57e5a11aaf;o=1",
+  "x-content-type-options": "nosniff",
+  "x-powered-by": "Express"
+}
+响应内容: <!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Error</title>
+</head>
+<body>
+<pre>Internal Server Error</pre>
+</body>
+</html>
+
+数据: "[undefined]"

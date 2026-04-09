@@ -1,1 +1,2 @@
 {"timestamp":1775665734733,"model":"google/gemini-3.1-flash-image-preview","provider":"openrouter","promptTokens":3,"completionTokens":1120,"totalTokens":1123,"latencyMs":12142,"cached":false}
+{"timestamp":1775724717848,"model":"deepseek/deepseek-r1-0528","provider":"openrouter","promptTokens":14,"completionTokens":50,"totalTokens":64,"latencyMs":4585,"cached":false}
