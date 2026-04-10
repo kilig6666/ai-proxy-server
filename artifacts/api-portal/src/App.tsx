@@ -1,4 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { Github } from "lucide-react";
+
+const PROJECT_NAME = "replit2-by-kilig";
+const PROJECT_AUTHOR = "by kilig";
+const PROJECT_REPO_URL = "https://github.com/kilig6666/ai-proxy-server";
+const PROJECT_VERSION = "v5.2";
+const PROJECT_TAGLINE = "OpenAI · Anthropic · Gemini · OpenRouter";
+const PROJECT_LOGO_URL = new URL("../../../scripts/src/图片.jpg", import.meta.url).href;
 
 /* ─────────────────────────────────────────────
    Apple-quality colour system
@@ -400,6 +408,34 @@ function StatusDot({ online, C, t }: { online: boolean | null; C: Record<string,
   );
 }
 
+function GithubLinkButton({ C }: { C: Record<string, string> }) {
+  return (
+    <a
+      href={PROJECT_REPO_URL}
+      target="_blank"
+      rel="noreferrer"
+      aria-label="Open GitHub project"
+      title="GitHub"
+      style={{
+        width: 32,
+        height: 32,
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        borderRadius: 10,
+        border: `1px solid ${C.border}`,
+        background: C.bgCard,
+        color: C.textMuted,
+        textDecoration: "none",
+        boxSizing: "border-box",
+        flexShrink: 0,
+      }}
+    >
+      <Github size={16} strokeWidth={2} />
+    </a>
+  );
+}
+
 function Section({ title, children, C }: { title: string; children: React.ReactNode; C: Record<string, string> }) {
   return (
     <div style={{ marginBottom: 36 }}>
@@ -495,18 +531,21 @@ function LoginPage({ C, t, onLogin }: { C: Record<string, string>; t: TType; onL
       <div style={{ width: "100%", maxWidth: 360 }}>
         {/* Logo mark */}
         <div style={{ textAlign: "center", marginBottom: 40 }}>
-          <div style={{
-            width: 64, height: 64, borderRadius: 18, margin: "0 auto 20px",
-            background: `linear-gradient(145deg, ${C.blue} 0%, ${C.purple} 100%)`,
-            display: "flex", alignItems: "center", justifyContent: "center",
-            boxShadow: `0 8px 32px ${C.blue}40`,
-          }}>
-            {/* Abstract lightning bolt via SVG */}
-            <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
-              <path d="M16 2L6 16h8l-2 10 12-14h-8l2-10z" fill="white" fillOpacity="0.95" />
-            </svg>
-          </div>
-          <div style={{ fontWeight: 600, fontSize: 26, color: C.text, letterSpacing: "-0.03em", marginBottom: 6 }}>AI Proxy Portal</div>
+          <img
+            src={PROJECT_LOGO_URL}
+            alt={`${PROJECT_NAME} logo`}
+            style={{
+              width: 64,
+              height: 64,
+              borderRadius: 18,
+              margin: "0 auto 20px",
+              objectFit: "cover",
+              display: "block",
+              boxShadow: C.shadow,
+              border: `1px solid ${C.border}`,
+            }}
+          />
+          <div style={{ fontWeight: 600, fontSize: 26, color: C.text, letterSpacing: "-0.03em", marginBottom: 6 }}>{PROJECT_NAME}</div>
           <div style={{ fontSize: 15, color: C.textMuted, letterSpacing: "-0.01em" }}>{t.loginSubtitle}</div>
         </div>
 
@@ -566,8 +605,8 @@ function LoginPage({ C, t, onLogin }: { C: Record<string, string>; t: TType; onL
             fontSize: 12, color: C.textDim, fontWeight: 400,
             letterSpacing: "-0.01em",
           }}>
-            <span style={{ fontFamily: "'SF Mono','Fira Code',monospace", color: C.textDim }}>v5.2</span>
-            <span>AI Proxy Portal</span>
+            <span style={{ fontFamily: "'SF Mono','Fira Code',monospace", color: C.textDim }}>{PROJECT_VERSION}</span>
+            <span>{PROJECT_NAME}</span>
           </span>
         </div>
       </div>
@@ -1581,6 +1620,15 @@ export default function App() {
 
   const handleSetLang = (l: Lang) => { setLang(l); localStorage.setItem("portalLang", l); };
 
+  useEffect(() => {
+    document.title = PROJECT_NAME;
+    const favicon = document.querySelector("link[rel='icon']") ?? document.createElement("link");
+    favicon.setAttribute("rel", "icon");
+    favicon.setAttribute("type", "image/jpeg");
+    favicon.setAttribute("href", PROJECT_LOGO_URL);
+    if (!favicon.parentNode) document.head.appendChild(favicon);
+  }, []);
+
   useEffect(() => { fetch("/api/healthz").then((r) => setOnline(r.ok)).catch(() => setOnline(false)); }, []);
 
   useEffect(() => {
@@ -1649,7 +1697,9 @@ export default function App() {
     return (
       <div style={{ fontFamily: "-apple-system, BlinkMacSystemFont, 'SF Pro Display', system-ui, sans-serif" }}>
         <div style={{ position: "fixed", top: 16, right: 20, display: "flex", alignItems: "center", gap: 12, zIndex: 100 }}>
-          <span style={{ fontSize: 11, color: C.textDim, fontFamily: "'SF Mono','Fira Code',monospace" }}>v5.2</span>
+          <span style={{ fontSize: 11, color: C.textDim, fontFamily: "'SF Mono','Fira Code',monospace" }}>{PROJECT_VERSION}</span>
+          <span style={{ fontSize: 12, color: C.textMuted, fontWeight: 500, letterSpacing: "-0.01em" }}>{PROJECT_AUTHOR}</span>
+          <GithubLinkButton C={C} />
           <LangToggle lang={lang} setLang={handleSetLang} C={C} />
         </div>
         <LoginPage C={C} t={t} onLogin={handleLogin} />
@@ -1695,24 +1745,29 @@ export default function App() {
       }}>
         {/* Logo + name */}
         <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
-          <div style={{
-            width: 30, height: 30, borderRadius: 8, flexShrink: 0,
-            background: `linear-gradient(145deg, ${C.blue} 0%, ${C.purple} 100%)`,
-            display: "flex", alignItems: "center", justifyContent: "center",
-          }}>
-            <svg width="15" height="15" viewBox="0 0 28 28" fill="none">
-              <path d="M16 2L6 16h8l-2 10 12-14h-8l2-10z" fill="white" fillOpacity="0.95" />
-            </svg>
-          </div>
+          <img
+            src={PROJECT_LOGO_URL}
+            alt={`${PROJECT_NAME} logo`}
+            style={{
+              width: 30,
+              height: 30,
+              borderRadius: 8,
+              flexShrink: 0,
+              objectFit: "cover",
+              border: `1px solid ${C.border}`,
+            }}
+          />
           <div>
-            <div style={{ fontWeight: 600, fontSize: 14, color: C.text, letterSpacing: "-0.025em" }}>AI Proxy API</div>
-            <div style={{ fontSize: 10, color: C.textMuted, letterSpacing: "-0.01em" }}>OpenAI · Anthropic · Gemini · OpenRouter</div>
+            <div style={{ fontWeight: 600, fontSize: 14, color: C.text, letterSpacing: "-0.025em" }}>{PROJECT_NAME}</div>
+            <div style={{ fontSize: 10, color: C.textMuted, letterSpacing: "-0.01em" }}>{PROJECT_TAGLINE}</div>
           </div>
         </div>
 
         {/* Right controls */}
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <span style={{ fontFamily: "'SF Mono','Fira Code',monospace", fontSize: 11, color: C.textDim }}>v5.2</span>
+          <span style={{ fontFamily: "'SF Mono','Fira Code',monospace", fontSize: 11, color: C.textDim }}>{PROJECT_VERSION}</span>
+          <span style={{ fontSize: 12, color: C.textMuted, fontWeight: 500, letterSpacing: "-0.01em" }}>{PROJECT_AUTHOR}</span>
+          <GithubLinkButton C={C} />
           <StatusDot online={online} C={C} t={t} />
           <LangToggle lang={lang} setLang={handleSetLang} C={C} />
           <button
