@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Github } from "lucide-react";
+import { useIsMobile } from "./hooks/use-mobile";
 
 const PROJECT_NAME = "replit2-by-kilig";
 const PROJECT_AUTHOR = "by kilig";
@@ -504,7 +505,7 @@ function LangToggle({ lang, setLang, C }: { lang: Lang; setLang: (l: Lang) => vo
 /* ─────────────────────────────────────────────
    Login Page — Apple ID quality
 ───────────────────────────────────────────── */
-function LoginPage({ C, t, onLogin }: { C: Record<string, string>; t: TType; onLogin: (token: string, proxyApiKey: string, oaiSet?: boolean, oaiFromEnv?: boolean) => void }) {
+function LoginPage({ C, t, onLogin, isMobile }: { C: Record<string, string>; t: TType; onLogin: (token: string, proxyApiKey: string, oaiSet?: boolean, oaiFromEnv?: boolean) => void; isMobile: boolean }) {
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -523,10 +524,10 @@ function LoginPage({ C, t, onLogin }: { C: Record<string, string>; t: TType; onL
 
   return (
     <div style={{
-      minHeight: "100vh", background: C.bg,
+      minHeight: "100dvh", background: C.bg,
       display: "flex", alignItems: "center", justifyContent: "center",
       fontFamily: "-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter', system-ui, sans-serif",
-      padding: "0 24px",
+      padding: isMobile ? "84px 16px 24px" : "0 24px",
     }}>
       <div style={{ width: "100%", maxWidth: 360 }}>
         {/* Logo mark */}
@@ -617,10 +618,11 @@ function LoginPage({ C, t, onLogin }: { C: Record<string, string>; t: TType; onL
 /* ─────────────────────────────────────────────
    Chat Tab
 ───────────────────────────────────────────── */
-function ChatTab({ C, t, proxyApiKey, adminToken, onKeyRefresh, onForceRelogin, initModel }: {
+function ChatTab({ C, t, proxyApiKey, adminToken, onKeyRefresh, onForceRelogin, initModel, isMobile }: {
   C: Record<string, string>; t: TType; proxyApiKey: string;
   adminToken: string; onKeyRefresh: (k: string) => void; onForceRelogin: () => void;
   initModel?: string | null;
+  isMobile: boolean;
 }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
@@ -732,18 +734,20 @@ function ChatTab({ C, t, proxyApiKey, adminToken, onKeyRefresh, onForceRelogin, 
   const selectedInfo = ALL_MODELS.find((m) => m.id === selectedModel);
 
   return (
-    <div style={{ display: "flex", gap: 16, height: "calc(100vh - 58px)", minHeight: 500 }}>
+    <div style={{ display: "flex", flexDirection: isMobile ? "column" : "row", gap: 16, height: isMobile ? "auto" : "calc(100vh - 58px)", minHeight: isMobile ? 0 : 500 }}>
       {/* Model selector sidebar */}
       <div style={{
-        width: 200, flexShrink: 0, display: "flex", flexDirection: "column",
-        gap: 2, overflowY: "auto", paddingRight: 4,
+        width: isMobile ? "100%" : 200, flexShrink: 0, display: "flex", flexDirection: isMobile ? "row" : "column",
+        gap: isMobile ? 12 : 2, overflowX: isMobile ? "auto" : "hidden", overflowY: isMobile ? "hidden" : "auto", paddingRight: isMobile ? 0 : 4, paddingBottom: isMobile ? 4 : 0,
       }}>
-        <div style={{
-          fontSize: 10, fontWeight: 600, color: C.textDim,
-          textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8, paddingLeft: 8,
-        }}>{t.selectModel}</div>
+        {!isMobile && (
+          <div style={{
+            fontSize: 10, fontWeight: 600, color: C.textDim,
+            textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8, paddingLeft: 8,
+          }}>{t.selectModel}</div>
+        )}
         {(["OpenAI", "Anthropic", "Gemini", "OpenRouter"] as const).map((provider) => (
-          <div key={provider}>
+          <div key={provider} style={{ flexShrink: 0, minWidth: isMobile ? 148 : undefined }}>
             <div style={{
               fontSize: 10, fontWeight: 600, color: providerColor(provider),
               textTransform: "uppercase", letterSpacing: "0.08em",
@@ -796,7 +800,7 @@ function ChatTab({ C, t, proxyApiKey, adminToken, onKeyRefresh, onForceRelogin, 
           {/* Header */}
           <div style={{
             padding: "12px 16px", borderBottom: `1px solid ${C.border}`,
-            display: "flex", alignItems: "center", gap: 10,
+            display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
           }}>
             {selectedInfo && (
               <span style={{
@@ -858,7 +862,7 @@ function ChatTab({ C, t, proxyApiKey, adminToken, onKeyRefresh, onForceRelogin, 
                     fontWeight: 500, letterSpacing: "-0.01em",
                   }}>{msg.role === "user" ? t.chatYou : selectedModel}</div>
                   <div style={{
-                    maxWidth: msg.images?.length ? "90%" : "80%",
+                    maxWidth: isMobile ? "100%" : msg.images?.length ? "90%" : "80%",
                     padding: "10px 14px", borderRadius: 14,
                     fontSize: 14, lineHeight: 1.65,
                     background: msg.role === "user" ? C.blue : C.bgInput,
@@ -913,7 +917,7 @@ function ChatTab({ C, t, proxyApiKey, adminToken, onKeyRefresh, onForceRelogin, 
           {/* Input bar */}
           <div style={{
             padding: "12px 16px", borderTop: `1px solid ${C.border}`,
-            display: "flex", gap: 10, alignItems: "flex-end",
+            display: "flex", flexDirection: isMobile ? "column" : "row", gap: 10, alignItems: isMobile ? "stretch" : "flex-end",
           }}>
             <textarea
               value={input}
@@ -939,7 +943,7 @@ function ChatTab({ C, t, proxyApiKey, adminToken, onKeyRefresh, onForceRelogin, 
                 border: "none", borderRadius: 10, padding: "10px 18px",
                 fontSize: 14, fontWeight: 500, color: !input.trim() || streaming ? C.textDim : "#fff",
                 cursor: !input.trim() || streaming ? "not-allowed" : "pointer",
-                transition: "all 0.18s", whiteSpace: "nowrap", letterSpacing: "-0.01em",
+                transition: "all 0.18s", whiteSpace: "nowrap", letterSpacing: "-0.01em", width: isMobile ? "100%" : undefined,
               }}
             >{t.sendBtn}</button>
           </div>
@@ -952,10 +956,11 @@ function ChatTab({ C, t, proxyApiKey, adminToken, onKeyRefresh, onForceRelogin, 
 /* ─────────────────────────────────────────────
    Settings Tab
 ───────────────────────────────────────────── */
-function SettingsTab({ C, t, adminToken, proxyApiKey, openaiDirectKeySet, openaiDirectKeyFromEnv, onProxyKeyChange, onOAIKeyChange }: {
+function SettingsTab({ C, t, adminToken, proxyApiKey, openaiDirectKeySet, openaiDirectKeyFromEnv, onProxyKeyChange, onOAIKeyChange, isMobile }: {
   C: Record<string, string>; t: TType; adminToken: string; proxyApiKey: string;
   openaiDirectKeySet: boolean; openaiDirectKeyFromEnv: boolean;
   onProxyKeyChange: (k: string) => void; onOAIKeyChange: (set: boolean) => void;
+  isMobile: boolean;
 }) {
   const [newKey, setNewKey] = useState(proxyApiKey);
   const [newPassword, setNewPassword] = useState("");
@@ -1029,7 +1034,7 @@ function SettingsTab({ C, t, adminToken, proxyApiKey, openaiDirectKeySet, openai
   );
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 24, maxWidth: 560 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 24, maxWidth: isMobile ? "100%" : 560 }}>
       <Section title={t.settingsKeyTitle} C={C}>
         <Card C={C}>
           <p style={{ fontSize: 14, color: C.textMuted, marginBottom: 18, marginTop: 0, letterSpacing: "-0.01em", lineHeight: 1.6 }}>{t.settingsKeyDesc}</p>
@@ -1065,7 +1070,7 @@ function SettingsTab({ C, t, adminToken, proxyApiKey, openaiDirectKeySet, openai
                 <label style={lbl}>{t.settingsOAIKeyLabel}</label>
                 <input type="password" value={oaiKey} onChange={(e) => setOaiKey(e.target.value)} placeholder={t.settingsOAIKeyPlaceholder} style={{ ...inp(), fontFamily: "'SF Mono','Fira Code',monospace", fontSize: 13 }} />
               </div>
-              <div style={{ display: "flex", gap: 10 }}>
+              <div style={{ display: "flex", flexDirection: isMobile ? "column" : "row", gap: 10 }}>
                 <PrimaryBtn onClick={() => saveOAIKey(oaiKey)} disabled={savingOAI || !oaiKey.trim()}>
                   {savingOAI ? t.saving : t.saveKeyBtn}
                 </PrimaryBtn>
@@ -1074,7 +1079,7 @@ function SettingsTab({ C, t, adminToken, proxyApiKey, openaiDirectKeySet, openai
                     background: "transparent", border: "none",
                     borderRadius: 10, padding: "10px 16px", fontSize: 14,
                     color: C.red, cursor: savingOAI ? "not-allowed" : "pointer",
-                    fontWeight: 500, letterSpacing: "-0.01em",
+                    fontWeight: 500, letterSpacing: "-0.01em", width: isMobile ? "100%" : undefined,
                   }}>{t.settingsOAIKeyClear}</button>
                 )}
               </div>
@@ -1137,7 +1142,7 @@ function providerBgOf(C: Record<string, string>, p: string): string {
   return C.purpleDark;
 }
 
-function ModelsTab({ C, t, onGoChat, adminToken, onForceRelogin }: { C: Record<string, string>; t: TType; onGoChat: (modelId: string) => void; adminToken: string; onForceRelogin: () => void }) {
+function ModelsTab({ C, t, onGoChat, adminToken, onForceRelogin, isMobile }: { C: Record<string, string>; t: TType; onGoChat: (modelId: string) => void; adminToken: string; onForceRelogin: () => void; isMobile: boolean }) {
   const staticGroups: { provider: string; color: string; bg: string; models: ModelMeta[] }[] = [
     { provider: "OpenAI",     color: C.blue,     bg: C.blueDark,     models: OPENAI_MODELS },
     { provider: "Anthropic",  color: C.orange,   bg: C.orangeDark,   models: ANTHROPIC_MODELS },
@@ -1205,7 +1210,7 @@ function ModelsTab({ C, t, onGoChat, adminToken, onForceRelogin }: { C: Record<s
   return (
     <div>
       {/* Toolbar */}
-      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 22, flexWrap: "wrap" }}>
+      <div style={{ display: "flex", flexDirection: isMobile ? "column" : "row", alignItems: isMobile ? "stretch" : "center", gap: 10, marginBottom: 22, flexWrap: "wrap" }}>
         {/* Provider filter pills */}
         <div style={{ display: "flex", gap: 7, flexWrap: "wrap", flex: 1 }}>
           {([
@@ -1242,7 +1247,7 @@ function ModelsTab({ C, t, onGoChat, adminToken, onForceRelogin }: { C: Record<s
             background: C.bgCard, border: "none", borderRadius: 10,
             padding: "7px 14px", fontSize: 13, color: C.text,
             outline: "none", letterSpacing: "-0.01em",
-            boxShadow: C.shadow, width: 190,
+            boxShadow: C.shadow, width: isMobile ? "100%" : 190,
           }}
         />
         {/* Refresh */}
@@ -1275,7 +1280,7 @@ function ModelsTab({ C, t, onGoChat, adminToken, onForceRelogin }: { C: Record<s
               <h3 style={{ margin: 0, fontSize: 15, fontWeight: 600, color: C.text, letterSpacing: "-0.02em" }}>{provider}</h3>
               <span style={{ background: bg, color, borderRadius: 20, padding: "2px 9px", fontSize: 11, fontWeight: 600 }}>{models.length}</span>
             </div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 8 }}>
+            <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(auto-fill, minmax(300px, 1fr))", gap: 8 }}>
               {models.map((m) => (
                 <div
                   key={m.id}
@@ -1463,8 +1468,9 @@ function fmtTs(ts: number, lang: Lang = "cn"): string {
   return d.toLocaleTimeString(lang === "cn" ? "zh-CN" : "en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
-function UsageTab({ C, t, lang, adminToken, onForceRelogin }: {
+function UsageTab({ C, t, lang, adminToken, onForceRelogin, isMobile }: {
   C: Record<string, string>; t: TType; lang: Lang; adminToken: string; onForceRelogin: () => void;
+  isMobile: boolean;
 }) {
   const [loading, setLoading] = useState(false);
   const [summary, setSummary] = useState<UsageSummary | null>(null);
@@ -1500,12 +1506,12 @@ function UsageTab({ C, t, lang, adminToken, onForceRelogin }: {
   return (
     <div>
       {/* Toolbar */}
-      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 24 }}>
+      <div style={{ display: "flex", flexDirection: isMobile ? "column" : "row", alignItems: isMobile ? "stretch" : "center", gap: 10, marginBottom: 24 }}>
         <h2 style={{ margin: 0, fontSize: 21, fontWeight: 700, color: C.text, letterSpacing: "-0.04em", flex: 1 }}>{t.usageTitle}</h2>
         <button onClick={() => void load()} disabled={loading} style={{
           background: C.bgCard, border: "none", borderRadius: 10, padding: "7px 16px",
           fontSize: 13, color: loading ? C.textDim : C.blue, cursor: loading ? "not-allowed" : "pointer",
-          boxShadow: C.shadow, fontWeight: 500, letterSpacing: "-0.01em",
+          boxShadow: C.shadow, fontWeight: 500, letterSpacing: "-0.01em", width: isMobile ? "100%" : undefined,
         }}>{loading ? "…" : t.usageRefresh}</button>
       </div>
       {err && <div style={{ fontSize: 12, color: C.red, marginBottom: 16 }}>{err}</div>}
@@ -1528,7 +1534,7 @@ function UsageTab({ C, t, lang, adminToken, onForceRelogin }: {
             {Object.entries(summary.byProvider).map(([prov, stats]) => {
               const color = providerColor(prov); const bg = providerBg(prov);
               return (
-                <div key={prov} style={{ background: C.bgCard, borderRadius: 12, padding: "14px 16px", boxShadow: C.shadow, minWidth: 160 }}>
+                <div key={prov} style={{ background: C.bgCard, borderRadius: 12, padding: "14px 16px", boxShadow: C.shadow, minWidth: isMobile ? "100%" : 160, flex: isMobile ? "1 1 100%" : undefined }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
                     <div style={{ width: 3, height: 16, borderRadius: 2, background: color }} />
                     <span style={{ fontSize: 13, fontWeight: 600, color: C.text }}>{prov}</span>
@@ -1599,6 +1605,7 @@ function UsageTab({ C, t, lang, adminToken, onForceRelogin }: {
    Root App
 ───────────────────────────────────────────── */
 export default function App() {
+  const isMobile = useIsMobile();
   const [dark, setDark] = useState(false);
   const [lang, setLang] = useState<Lang>(() => (localStorage.getItem("portalLang") as Lang) ?? "cn");
   const [online, setOnline] = useState<boolean | null>(null);
@@ -1696,13 +1703,13 @@ export default function App() {
   if (!authed) {
     return (
       <div style={{ fontFamily: "-apple-system, BlinkMacSystemFont, 'SF Pro Display', system-ui, sans-serif" }}>
-        <div style={{ position: "fixed", top: 16, right: 20, display: "flex", alignItems: "center", gap: 12, zIndex: 100 }}>
+        <div style={{ position: "fixed", top: 16, left: isMobile ? 12 : "auto", right: isMobile ? 12 : 20, display: "flex", alignItems: "center", justifyContent: isMobile ? "space-between" : "flex-start", gap: isMobile ? 8 : 12, flexWrap: "wrap", zIndex: 100 }}>
           <span style={{ fontSize: 11, color: C.textDim, fontFamily: "'SF Mono','Fira Code',monospace" }}>{PROJECT_VERSION}</span>
           <span style={{ fontSize: 12, color: C.textMuted, fontWeight: 500, letterSpacing: "-0.01em" }}>{PROJECT_AUTHOR}</span>
           <GithubLinkButton C={C} />
           <LangToggle lang={lang} setLang={handleSetLang} C={C} />
         </div>
-        <LoginPage C={C} t={t} onLogin={handleLogin} />
+        <LoginPage C={C} t={t} onLogin={handleLogin} isMobile={isMobile} />
       </div>
     );
   }
@@ -1727,17 +1734,17 @@ export default function App() {
 
   return (
     <div style={{
-      height: "100vh", display: "flex", flexDirection: "column",
+      height: isMobile ? "100dvh" : "100vh", display: "flex", flexDirection: "column",
       background: C.bg, color: C.text,
       fontFamily: "-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter', system-ui, sans-serif",
       lineHeight: 1.6, transition: "background 0.25s, color 0.25s",
     }}>
       {/* ── Frosted glass top header ── */}
       <div style={{
-        height: 57, flexShrink: 0,
+        minHeight: 57, flexShrink: 0,
         borderBottom: `1px solid ${C.border}`,
-        padding: "0 20px",
-        display: "flex", alignItems: "center", justifyContent: "space-between",
+        padding: isMobile ? "12px 16px" : "0 20px",
+        display: "flex", alignItems: isMobile ? "flex-start" : "center", justifyContent: "space-between", flexWrap: isMobile ? "wrap" : "nowrap", gap: isMobile ? 12 : 0,
         background: dark ? "rgba(28,28,30,0.85)" : "rgba(255,255,255,0.85)",
         backdropFilter: "blur(20px)",
         WebkitBackdropFilter: "blur(20px)",
@@ -1759,12 +1766,12 @@ export default function App() {
           />
           <div>
             <div style={{ fontWeight: 600, fontSize: 14, color: C.text, letterSpacing: "-0.025em" }}>{PROJECT_NAME}</div>
-            <div style={{ fontSize: 10, color: C.textMuted, letterSpacing: "-0.01em" }}>{PROJECT_TAGLINE}</div>
+            {!isMobile && <div style={{ fontSize: 10, color: C.textMuted, letterSpacing: "-0.01em" }}>{PROJECT_TAGLINE}</div>}
           </div>
         </div>
 
         {/* Right controls */}
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: isMobile ? "space-between" : "flex-start", gap: isMobile ? 8 : 12, flexWrap: "wrap", width: isMobile ? "100%" : "auto" }}>
           <span style={{ fontFamily: "'SF Mono','Fira Code',monospace", fontSize: 11, color: C.textDim }}>{PROJECT_VERSION}</span>
           <span style={{ fontSize: 12, color: C.textMuted, fontWeight: 500, letterSpacing: "-0.01em" }}>{PROJECT_AUTHOR}</span>
           <GithubLinkButton C={C} />
@@ -1792,16 +1799,17 @@ export default function App() {
       </div>
 
       {/* ── Body ── */}
-      <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
+      <div style={{ flex: 1, display: "flex", flexDirection: isMobile ? "column" : "row", overflow: "hidden" }}>
         {/* Left sidebar nav */}
         <div style={{
-          width: 180, flexShrink: 0,
-          borderRight: `1px solid ${C.border}`,
+          width: isMobile ? "100%" : 180, flexShrink: 0,
+          borderRight: isMobile ? "none" : `1px solid ${C.border}`,
+          borderBottom: isMobile ? `1px solid ${C.border}` : "none",
           background: dark ? "rgba(28,28,30,0.6)" : "rgba(255,255,255,0.6)",
           backdropFilter: "blur(10px)",
           WebkitBackdropFilter: "blur(10px)",
-          display: "flex", flexDirection: "column",
-          padding: "16px 10px", gap: 2, overflowY: "auto",
+          display: "flex", flexDirection: isMobile ? "row" : "column",
+          padding: isMobile ? "10px" : "16px 10px", gap: isMobile ? 6 : 2, overflowX: isMobile ? "auto" : "hidden", overflowY: isMobile ? "hidden" : "auto",
         }}>
           {TABS.map((tb) => {
             const active = tab === tb.key;
@@ -1811,12 +1819,12 @@ export default function App() {
                 onClick={() => setTab(tb.key)}
                 style={{
                   display: "flex", alignItems: "center", gap: 9,
-                  width: "100%", textAlign: "left",
+                  width: isMobile ? "auto" : "100%", textAlign: "left", whiteSpace: "nowrap", flexShrink: 0,
                   background: active ? (dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.05)") : "transparent",
-                  borderTop: "none", borderRight: "none", borderBottom: "none",
-                  borderLeft: `3px solid ${active ? C.blue : "transparent"}`,
-                  borderRadius: "0 10px 10px 0",
-                  padding: "9px 12px 9px 10px",
+                  borderTop: "none", borderRight: "none", borderBottom: isMobile ? `3px solid ${active ? C.blue : "transparent"}` : "none",
+                  borderLeft: isMobile ? "none" : `3px solid ${active ? C.blue : "transparent"}`,
+                  borderRadius: isMobile ? 10 : "0 10px 10px 0",
+                  padding: isMobile ? "9px 12px" : "9px 12px 9px 10px",
                   cursor: "pointer",
                   color: active ? C.text : C.textMuted,
                   fontSize: 14, fontWeight: active ? 500 : 400,
@@ -1835,7 +1843,7 @@ export default function App() {
           <div style={{
             maxWidth: tab === "chat" ? 9999 : 860,
             margin: "0 auto",
-            padding: tab === "chat" ? "20px 20px 16px" : "32px 32px 64px",
+            padding: tab === "chat" ? (isMobile ? "14px 12px 20px" : "20px 20px 16px") : (isMobile ? "18px 14px 32px" : "32px 32px 64px"),
           }}>
 
             {/* ── Dashboard ── */}
@@ -1970,13 +1978,13 @@ export default function App() {
               <ChatTab
                 C={C} t={t} proxyApiKey={proxyApiKey} adminToken={adminToken}
                 onKeyRefresh={setProxyApiKey} onForceRelogin={handleForceRelogin}
-                initModel={chatInitModel}
+                initModel={chatInitModel} isMobile={isMobile}
               />
             )}
 
             {/* ── Models ── */}
             {tab === "models" && (
-              <ModelsTab C={C} t={t} onGoChat={handleGoChat} adminToken={adminToken} onForceRelogin={handleForceRelogin} />
+              <ModelsTab C={C} t={t} onGoChat={handleGoChat} adminToken={adminToken} onForceRelogin={handleForceRelogin} isMobile={isMobile} />
             )}
 
             {/* ── Settings ── */}
@@ -1984,11 +1992,11 @@ export default function App() {
               <SettingsTab
                 C={C} t={t} adminToken={adminToken} proxyApiKey={proxyApiKey}
                 openaiDirectKeySet={openaiDirectKeySet} openaiDirectKeyFromEnv={openaiDirectKeyFromEnv}
-                onProxyKeyChange={setProxyApiKey} onOAIKeyChange={setOpenaiDirectKeySet}
+                onProxyKeyChange={setProxyApiKey} onOAIKeyChange={setOpenaiDirectKeySet} isMobile={isMobile}
               />
             )}
             {tab === "usage" && (
-              <UsageTab C={C} t={t} lang={lang} adminToken={adminToken} onForceRelogin={handleForceRelogin} />
+              <UsageTab C={C} t={t} lang={lang} adminToken={adminToken} onForceRelogin={handleForceRelogin} isMobile={isMobile} />
             )}
           </div>
         </div>
