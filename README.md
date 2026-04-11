@@ -1,3 +1,5 @@
+友链：[https://linux.do/](https://linux.do/)
+
 # replit2-by-kilig
 
 > **by kilig** — V6.0
