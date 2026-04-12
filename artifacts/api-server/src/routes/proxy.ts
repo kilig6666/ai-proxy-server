@@ -2067,6 +2067,7 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
   if (thinkingResolution) {
     logThinkingDecision(req, thinkingResolution);
   }
+  const startTs = Date.now();
 
   if (isAnthropicModel(model)) {
     const sampling = normalizeSamplingParams("anthropic", samplingInput);
@@ -2134,10 +2135,29 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
 
       try {
         const anthropicStream = anthropic.messages.stream(anthropicParams, anthropicRequestOptions);
+        let streamInputTokens = 0;
+        let streamOutputTokens = 0;
         for await (const event of anthropicStream) {
+          if (event.type === "message_start") {
+            streamInputTokens = event.message.usage?.input_tokens ?? streamInputTokens;
+          } else if (event.type === "message_delta") {
+            streamOutputTokens = event.usage?.output_tokens ?? streamOutputTokens;
+          }
           res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
           (res as any).flush?.();
         }
+        const latencyMs = Date.now() - startTs;
+        req.log.info({ model, provider: "anthropic", latencyMs, stream: true, promptTokens: streamInputTokens, completionTokens: streamOutputTokens }, "Anthropic native stream complete");
+        appendUsage({
+          timestamp: Date.now(),
+          model,
+          provider: "anthropic",
+          promptTokens: streamInputTokens,
+          completionTokens: streamOutputTokens,
+          totalTokens: streamInputTokens + streamOutputTokens,
+          latencyMs,
+          cached: false,
+        });
       } catch (streamErr) {
         req.log.error({ err: streamErr, model, provider: "anthropic" }, "Anthropic native stream error");
         try {
@@ -2156,6 +2176,20 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
       const finalMsg = await withRetry(() =>
         anthropic.messages.stream(anthropicParams, anthropicRequestOptions).finalMessage()
       );
+      const promptTokens = finalMsg.usage.input_tokens;
+      const completionTokens = finalMsg.usage.output_tokens;
+      const latencyMs = Date.now() - startTs;
+      req.log.info({ model, provider: "anthropic", latencyMs, promptTokens, completionTokens }, "Anthropic native request complete");
+      appendUsage({
+        timestamp: Date.now(),
+        model,
+        provider: "anthropic",
+        promptTokens,
+        completionTokens,
+        totalTokens: promptTokens + completionTokens,
+        latencyMs,
+        cached: false,
+      });
       res.json(finalMsg);
     } catch (err: unknown) {
       req.log.error({ err, model, provider: "anthropic" }, "Anthropic native error");
@@ -2211,13 +2245,19 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
         (res as any).flush?.();
 
         const openAIStream = await withRetry(() =>
-          openai.chat.completions.create({ ...openAIParams, stream: true })
+          openai.chat.completions.create({
+            ...openAIParams,
+            stream: true,
+            stream_options: { include_usage: true },
+          } as OpenAI.ChatCompletionCreateParamsStreaming)
         );
         let currentToolBlockIndex = -1;
         let nextContentBlockIndex = 0;
         let textBlockIndex = -1;
         let thinkingBlockIndex = -1;
-        let outputTokens = 0;
+        let promptTokens = 0;
+        let completionTokens = 0;
+        let emittedOutputTokens = 0;
         let textBlockActive = false;
         let thinkingBlockActive = false;
 
@@ -2258,6 +2298,11 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
         };
 
         for await (const chunk of openAIStream) {
+          const usage = (chunk as { usage?: { prompt_tokens?: number; completion_tokens?: number } }).usage;
+          if (usage) {
+            promptTokens = usage.prompt_tokens ?? promptTokens;
+            completionTokens = usage.completion_tokens ?? completionTokens;
+          }
           const choice = chunk.choices[0];
           if (!choice) continue;
           const delta = choice.delta as OpenAI.ChatCompletionChunk.Choice["delta"] & { reasoning_content?: unknown };
@@ -2265,7 +2310,7 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
           if (delta.content) {
             startTextBlock();
             res.write(`event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", index: textBlockIndex, delta: { type: "text_delta", text: delta.content } })}\n\n`);
-            outputTokens++;
+            emittedOutputTokens++;
             (res as any).flush?.();
           }
 
@@ -2307,11 +2352,23 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
               res.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: currentToolBlockIndex })}\n\n`);
               currentToolBlockIndex = -1;
             }
-            res.write(`event: message_delta\ndata: ${JSON.stringify({ type: "message_delta", delta: { stop_reason: stopReason, stop_sequence: null }, usage: { output_tokens: outputTokens } })}\n\n`);
+            res.write(`event: message_delta\ndata: ${JSON.stringify({ type: "message_delta", delta: { stop_reason: stopReason, stop_sequence: null }, usage: { output_tokens: completionTokens || emittedOutputTokens } })}\n\n`);
             res.write(`event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}\n\n`);
             (res as any).flush?.();
           }
         }
+        const latencyMs = Date.now() - startTs;
+        req.log.info({ model, provider: "openai", latencyMs, stream: true, promptTokens, completionTokens: completionTokens || emittedOutputTokens }, "OpenAI→Anthropic stream complete");
+        appendUsage({
+          timestamp: Date.now(),
+          model,
+          provider: "openai",
+          promptTokens,
+          completionTokens: completionTokens || emittedOutputTokens,
+          totalTokens: promptTokens + (completionTokens || emittedOutputTokens),
+          latencyMs,
+          cached: false,
+        });
       } catch (streamErr) {
         req.log.error({ err: streamErr, model, provider: "openai" }, "OpenAI→Anthropic stream error in /messages");
         try {
@@ -2358,6 +2415,20 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
           output_tokens: openAIResult.usage?.completion_tokens ?? 0,
         },
       };
+      const promptTokens = openAIResult.usage?.prompt_tokens ?? 0;
+      const completionTokens = openAIResult.usage?.completion_tokens ?? 0;
+      const latencyMs = Date.now() - startTs;
+      req.log.info({ model, provider: "openai", latencyMs, promptTokens, completionTokens }, "OpenAI→Anthropic request complete");
+      appendUsage({
+        timestamp: Date.now(),
+        model,
+        provider: "openai",
+        promptTokens,
+        completionTokens,
+        totalTokens: promptTokens + completionTokens,
+        latencyMs,
+        cached: false,
+      });
       res.json(anthropicResponse);
     } catch (err: unknown) {
       req.log.error({ err, model, provider: "openai" }, "OpenAI error in /messages");
@@ -2438,7 +2509,9 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
         let nextContentBlockIndex = 0;
         let textBlockIndex = -1;
         let thinkingBlockIndex = -1;
-        let outputTokens = 0;
+        let promptTokens = 0;
+        let completionTokens = 0;
+        let emittedOutputTokens = 0;
         let textBlockActive = false;
         let thinkingBlockActive = false;
 
@@ -2489,7 +2562,7 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
             } else if (part.text) {
               startTextBlock();
               res.write(`event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", index: textBlockIndex, delta: { type: "text_delta", text: part.text } })}\n\n`);
-              outputTokens++;
+              emittedOutputTokens++;
               (res as any).flush?.();
             } else if (part.functionCall) {
               stopTextBlock();
@@ -2504,6 +2577,12 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
             }
           }
 
+          const meta = (chunk as any).usageMetadata;
+          if (meta) {
+            promptTokens = meta.promptTokenCount ?? promptTokens;
+            completionTokens = meta.candidatesTokenCount ?? completionTokens;
+          }
+
           if (candidate?.finishReason) {
             stopTextBlock();
             stopThinkingBlock();
@@ -2516,11 +2595,23 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
               : candidate.finishReason === "MAX_TOKENS"
                 ? "max_tokens"
                 : "end_turn";
-            res.write(`event: message_delta\ndata: ${JSON.stringify({ type: "message_delta", delta: { stop_reason: stopReason, stop_sequence: null }, usage: { output_tokens: outputTokens } })}\n\n`);
+            res.write(`event: message_delta\ndata: ${JSON.stringify({ type: "message_delta", delta: { stop_reason: stopReason, stop_sequence: null }, usage: { output_tokens: completionTokens || emittedOutputTokens } })}\n\n`);
             res.write(`event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}\n\n`);
             (res as any).flush?.();
           }
         }
+        const latencyMs = Date.now() - startTs;
+        req.log.info({ model, provider: "gemini", latencyMs, stream: true, promptTokens, completionTokens: completionTokens || emittedOutputTokens }, "Gemini→Anthropic stream complete");
+        appendUsage({
+          timestamp: Date.now(),
+          model,
+          provider: "gemini",
+          promptTokens,
+          completionTokens: completionTokens || emittedOutputTokens,
+          totalTokens: promptTokens + (completionTokens || emittedOutputTokens),
+          latencyMs,
+          cached: false,
+        });
       } catch (streamErr) {
         req.log.error({ err: streamErr, model, provider: "gemini" }, "Gemini→Anthropic stream error in /messages");
         try {
@@ -2577,6 +2668,20 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
           output_tokens: meta?.candidatesTokenCount ?? 0,
         },
       });
+      const promptTokens = meta?.promptTokenCount ?? 0;
+      const completionTokens = meta?.candidatesTokenCount ?? 0;
+      const latencyMs = Date.now() - startTs;
+      req.log.info({ model, provider: "gemini", latencyMs, promptTokens, completionTokens }, "Gemini→Anthropic request complete");
+      appendUsage({
+        timestamp: Date.now(),
+        model,
+        provider: "gemini",
+        promptTokens,
+        completionTokens,
+        totalTokens: promptTokens + completionTokens,
+        latencyMs,
+        cached: false,
+      });
     } catch (err: unknown) {
       req.log.error({ err, model, provider: "gemini" }, "Gemini error in /messages");
       sendAnthropicProviderError(res, err);
@@ -2623,13 +2728,19 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
         (res as any).flush?.();
 
         const orStream = await withRetry(() =>
-          openrouter.chat.completions.create({ ...orParams, stream: true })
+          openrouter.chat.completions.create({
+            ...orParams,
+            stream: true,
+            stream_options: { include_usage: true },
+          } as OpenAI.ChatCompletionCreateParamsStreaming)
         );
 
         let currentToolBlockIndex = -1;
         let nextContentBlockIndex = 0;
         let textBlockIndex = -1;
-        let outputTokens = 0;
+        let promptTokens = 0;
+        let completionTokens = 0;
+        let emittedOutputTokens = 0;
         let textBlockActive = false;
 
         const stopTextBlock = () => {
@@ -2650,6 +2761,11 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
         };
 
         for await (const chunk of orStream) {
+          const usage = (chunk as { usage?: { prompt_tokens?: number; completion_tokens?: number } }).usage;
+          if (usage) {
+            promptTokens = usage.prompt_tokens ?? promptTokens;
+            completionTokens = usage.completion_tokens ?? completionTokens;
+          }
           const choice = chunk.choices[0];
           if (!choice) continue;
           const delta = choice.delta;
@@ -2657,7 +2773,7 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
           if (delta.content) {
             startTextBlock();
             res.write(`event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", index: textBlockIndex, delta: { type: "text_delta", text: delta.content } })}\n\n`);
-            outputTokens++;
+            emittedOutputTokens++;
             (res as any).flush?.();
           }
 
@@ -2688,11 +2804,23 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
               res.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: currentToolBlockIndex })}\n\n`);
               currentToolBlockIndex = -1;
             }
-            res.write(`event: message_delta\ndata: ${JSON.stringify({ type: "message_delta", delta: { stop_reason: stopReason, stop_sequence: null }, usage: { output_tokens: outputTokens } })}\n\n`);
+            res.write(`event: message_delta\ndata: ${JSON.stringify({ type: "message_delta", delta: { stop_reason: stopReason, stop_sequence: null }, usage: { output_tokens: completionTokens || emittedOutputTokens } })}\n\n`);
             res.write(`event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}\n\n`);
             (res as any).flush?.();
           }
         }
+        const latencyMs = Date.now() - startTs;
+        req.log.info({ model, provider: "openrouter", latencyMs, stream: true, promptTokens, completionTokens: completionTokens || emittedOutputTokens }, "OpenRouter→Anthropic stream complete");
+        appendUsage({
+          timestamp: Date.now(),
+          model,
+          provider: "openrouter",
+          promptTokens,
+          completionTokens: completionTokens || emittedOutputTokens,
+          totalTokens: promptTokens + (completionTokens || emittedOutputTokens),
+          latencyMs,
+          cached: false,
+        });
       } catch (streamErr) {
         req.log.error({ err: streamErr, model, provider: "openrouter" }, "OpenRouter→Anthropic stream error in /messages");
         try {
@@ -2732,6 +2860,20 @@ router.post("/messages", requireAuth, async (req: Request, res: Response) => {
           input_tokens: orResult.usage?.prompt_tokens ?? 0,
           output_tokens: orResult.usage?.completion_tokens ?? 0,
         },
+      });
+      const promptTokens = orResult.usage?.prompt_tokens ?? 0;
+      const completionTokens = orResult.usage?.completion_tokens ?? 0;
+      const latencyMs = Date.now() - startTs;
+      req.log.info({ model, provider: "openrouter", latencyMs, promptTokens, completionTokens }, "OpenRouter→Anthropic request complete");
+      appendUsage({
+        timestamp: Date.now(),
+        model,
+        provider: "openrouter",
+        promptTokens,
+        completionTokens,
+        totalTokens: promptTokens + completionTokens,
+        latencyMs,
+        cached: false,
       });
     } catch (err: unknown) {
       req.log.error({ err, model, provider: "openrouter" }, "OpenRouter error in /messages");
